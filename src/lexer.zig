@@ -29,7 +29,13 @@ pub const Lexer = struct {
     }
 
     pub fn next(l: *Lexer) Token {
-        while (l.pos < l.src.len and isWhitespace(l.src[l.pos])) l.pos += 1;
+        while (l.pos < l.src.len) {
+            if (isWhitespace(l.src[l.pos])) {
+                l.pos += 1;
+            } else if (l.src[l.pos] == ';') {
+                while (l.pos < l.src.len and l.src[l.pos] != '\n') l.pos += 1;
+            } else break;
+        }
         const start = l.pos;
         if (l.pos >= l.src.len) return .{ .tag = .eof, .start = start, .end = start };
 
@@ -199,6 +205,16 @@ test "string escapes" {
 test "unterminated string is invalid, not a hang" {
     try expectTokens("\"abc", &.{.invalid});
     try expectTokens("\"abc\\", &.{.invalid});
+}
+
+test "comments run to end of line" {
+    try expectTokens("1 ; two 3 four\n5", &.{ .integer, .integer });
+    try expectTokens("; only a comment", &.{});
+    try expectTokens("(a ;)\n)", &.{ .lparen, .symbol, .rparen });
+}
+
+test "semicolon inside a string is not a comment" {
+    try expectTokens("\"a;b\" 1", &.{ .string, .integer });
 }
 
 test "symbols cannot start with a digit run" {
