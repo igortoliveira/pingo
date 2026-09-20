@@ -1,10 +1,10 @@
 # Pingo
 
-Um modelo de execução para programas sandboxed — orientado a dependências,
-suspensão e efeitos — com Scheme como primeiro frontend. Implementado em Zig.
+An execution model for sandboxed programs — dependency-, suspension- and
+effect-oriented — with Scheme as its first frontend. Implemented in Zig.
 
-- Motivação e arquitetura: `deep-research-report.md`
-- Plano de execução (commits pequenos): `PLAN.md`
-- Semântica normativa: `docs/semantics.md` (em construção)
+- Motivation and architecture: `deep-research-report.md`
+- Execution plan (small commits): `PLAN.md`
+- Normative semantics: `docs/semantics.md` (in progress)
 
 Zig: **0.16.0**
