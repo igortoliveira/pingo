@@ -213,3 +213,34 @@ test "syntax errors" {
         try std.testing.expectError(case.err, t.start(case.src, 8).read());
     }
 }
+
+fn readAllIgnoringErrors(src: []const u8) void {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    var r = Reader.init(arena_state.allocator(), src, 16);
+    // Any outcome is fine (value, error, or eof) — the property under test is
+    // "no crash, no hang, no leak" on arbitrary input.
+    while (r.read() catch null) |_| {}
+}
+
+test "malformed corpus never crashes" {
+    const corpus = [_][]const u8{
+        "", "'", "''", "'(", "((((((((((((((((((((((((1",
+        ")))))", "\"", "\"\\", "\"\\q", "#", "#t#f", ". . .",
+        "\x00\xff\x80 1", "(\x00)", ";\x00", "-", "+", "9223372036854775808",
+        "(1 . 2 . 3)", "'\"", "(()()()(()())",
+    };
+    for (corpus) |src| readAllIgnoringErrors(src);
+}
+
+fn fuzzReader(_: void, smith: *std.testing.Smith) !void {
+    var buf: [256]u8 = undefined;
+    const len: usize = smith.value(u8);
+    const src = buf[0..@min(len, buf.len)];
+    smith.bytes(src);
+    readAllIgnoringErrors(src);
+}
+
+test "fuzz: reader survives arbitrary bytes" {
+    try std.testing.fuzz({}, fuzzReader, .{});
+}
