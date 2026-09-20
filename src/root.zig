@@ -10,6 +10,7 @@ pub const reader = @import("reader.zig");
 pub const printer = @import("printer.zig");
 pub const value = @import("value.zig");
 pub const eval = @import("eval.zig");
+pub const env = @import("env.zig");
 
 test {
     std.testing.refAllDecls(@This());
