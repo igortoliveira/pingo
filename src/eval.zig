@@ -56,6 +56,26 @@ pub const Evaluator = struct {
                     return try value_mod.fromDatum(e.arena, p.cdr.pair.car);
                 }
                 if (isForm(p, "define")) return Error.BadSyntax; // top level only (§2)
+                if (isForm(p, "if")) {
+                    // (if c t) or (if c t e); c evaluates first, then exactly
+                    // one branch (§2).
+                    const c = p.cdr;
+                    if (c != .pair or c.pair.cdr != .pair) return Error.BadSyntax;
+                    const t = c.pair.cdr.pair;
+                    var alt: ?Datum = null;
+                    switch (t.cdr) {
+                        .empty_list => {},
+                        .pair => |a| {
+                            if (a.cdr != .empty_list) return Error.BadSyntax;
+                            alt = a.car;
+                        },
+                        else => return Error.BadSyntax,
+                    }
+                    const cond = try e.eval(c.pair.car, scope);
+                    if (isTruthy(cond)) return e.eval(t.car, scope);
+                    if (alt) |a| return e.eval(a, scope);
+                    return .unspecified;
+                }
                 return Error.Unsupported; // other forms and applications come later
             },
         }
@@ -64,6 +84,11 @@ pub const Evaluator = struct {
 
 fn isForm(p: *const Datum.Pair, name: []const u8) bool {
     return p.car == .symbol and std.mem.eql(u8, p.car.symbol, name);
+}
+
+/// Semantics §2: only #f is false.
+fn isTruthy(v: Value) bool {
+    return !(v == .boolean and !v.boolean);
 }
 
 // -- tests --------------------------------------------------------------
@@ -122,6 +147,39 @@ test "quote arity and bare () are syntax errors" {
     try std.testing.expectError(error.BadSyntax, s.run("(quote)"));
     try std.testing.expectError(error.BadSyntax, s.run("(quote 1 2)"));
     try std.testing.expectError(error.BadSyntax, s.run("()"));
+}
+
+test "if evaluates exactly one branch" {
+    var s = TestSession.init();
+    defer s.deinit();
+    try std.testing.expectEqual(@as(i64, 1), (try s.run("(if #t 1 2)")).integer);
+    try std.testing.expectEqual(@as(i64, 2), (try s.run("(if #f 1 2)")).integer);
+    // The untaken branch is not evaluated: `boom` is unbound but must not fire.
+    try std.testing.expectEqual(@as(i64, 1), (try s.run("(if #t 1 boom)")).integer);
+    try std.testing.expectEqual(@as(i64, 2), (try s.run("(if #f boom 2)")).integer);
+}
+
+test "only #f is false" {
+    var s = TestSession.init();
+    defer s.deinit();
+    try std.testing.expectEqual(@as(i64, 1), (try s.run("(if 0 1 2)")).integer);
+    try std.testing.expectEqual(@as(i64, 1), (try s.run("(if \"\" 1 2)")).integer);
+    try std.testing.expectEqual(@as(i64, 1), (try s.run("(if '() 1 2)")).integer);
+}
+
+test "if without alternative returns unspecified on false" {
+    var s = TestSession.init();
+    defer s.deinit();
+    try std.testing.expectEqual(Value.unspecified, try s.run("(if #f 1)"));
+    try std.testing.expectEqual(@as(i64, 1), (try s.run("(if #t 1)")).integer);
+}
+
+test "if arity is checked" {
+    var s = TestSession.init();
+    defer s.deinit();
+    try std.testing.expectError(error.BadSyntax, s.run("(if)"));
+    try std.testing.expectError(error.BadSyntax, s.run("(if #t)"));
+    try std.testing.expectError(error.BadSyntax, s.run("(if #t 1 2 3)"));
 }
 
 test "define binds, returns unspecified, and persists" {
