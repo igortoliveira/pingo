@@ -14,6 +14,7 @@ pub const Token = struct {
         integer,
         symbol,
         boolean, // #t or #f; which one is in the source text
+        string, // includes the surrounding quotes; escapes are decoded by the reader
         invalid,
         eof,
     };
@@ -44,6 +45,7 @@ pub const Lexer = struct {
                 return l.symbol(start);
             },
             '#' => return l.boolean(start),
+            '"' => return l.string(start),
             else => {
                 if (isSymbolInitial(l.src[l.pos])) return l.symbol(start);
                 return l.single(.invalid, start);
@@ -75,6 +77,34 @@ pub const Lexer = struct {
         }
         // Not #t/#f followed by a delimiter: consume the run so lexing resumes cleanly.
         while (l.pos < l.src.len and isSymbolChar(l.src[l.pos])) l.pos += 1;
+        return .{ .tag = .invalid, .start = start, .end = l.pos };
+    }
+
+    fn string(l: *Lexer, start: usize) Token {
+        l.pos += 1; // consume opening '"'
+        var valid = true;
+        while (l.pos < l.src.len) {
+            switch (l.src[l.pos]) {
+                '"' => {
+                    l.pos += 1;
+                    const tag: Token.Tag = if (valid) .string else .invalid;
+                    return .{ .tag = tag, .start = start, .end = l.pos };
+                },
+                '\\' => {
+                    l.pos += 1;
+                    if (l.pos >= l.src.len) break;
+                    switch (l.src[l.pos]) {
+                        '"', '\\', 'n' => l.pos += 1,
+                        else => {
+                            valid = false; // unknown escape; keep scanning to the closing quote
+                            l.pos += 1;
+                        },
+                    }
+                },
+                else => l.pos += 1,
+            }
+        }
+        // Unterminated: consume the rest so lexing terminates.
         return .{ .tag = .invalid, .start = start, .end = l.pos };
     }
 };
@@ -154,6 +184,21 @@ test "booleans" {
 test "malformed hash forms are invalid" {
     try expectTokens("#true", &.{.invalid});
     try expectTokens("#x #", &.{ .invalid, .invalid });
+}
+
+test "strings" {
+    try expectTokens("\"hello\" \"\"", &.{ .string, .string });
+    try expectTokens("(\"a\" 1)", &.{ .lparen, .string, .integer, .rparen });
+}
+
+test "string escapes" {
+    try expectTokens("\"a\\\"b\" \"a\\\\b\" \"a\\nb\"", &.{ .string, .string, .string });
+    try expectTokens("\"bad\\qesc\"", &.{.invalid});
+}
+
+test "unterminated string is invalid, not a hang" {
+    try expectTokens("\"abc", &.{.invalid});
+    try expectTokens("\"abc\\", &.{.invalid});
 }
 
 test "symbols cannot start with a digit run" {
