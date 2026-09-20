@@ -8,6 +8,7 @@ pub const lexer = @import("lexer.zig");
 pub const datum = @import("datum.zig");
 pub const reader = @import("reader.zig");
 pub const printer = @import("printer.zig");
+pub const value = @import("value.zig");
 
 test {
     std.testing.refAllDecls(@This());

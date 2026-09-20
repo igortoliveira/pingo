@@ -1,0 +1,72 @@
+//! Value: runtime values (semantics §1). Distinct from Datum, which is what
+//! the reader produces: closures and primitives exist only at runtime, and a
+//! quoted datum must be converted before the evaluator can touch it.
+//!
+//! Ownership: values live in an arena owned by the evaluation session, which
+//! outlives any single read (a `define`d value must survive the line that
+//! created it). `fromDatum` therefore copies bytes instead of aliasing.
+
+const std = @import("std");
+const datum_mod = @import("datum.zig");
+
+pub const Value = union(enum) {
+    integer: i64,
+    boolean: bool,
+    symbol: []const u8,
+    string: []const u8,
+    pair: *Pair,
+    empty_list,
+    unspecified,
+    // The closure and primitive variants land with lambda (plan 3.6) and the
+    // first primitives (plan 3.7).
+
+    pub const Pair = struct { car: Value, cdr: Value };
+};
+
+/// Deep-converts a reader Datum into a Value, copying bytes so the Value's
+/// lifetime is independent of the Datum's arena.
+pub fn fromDatum(arena: std.mem.Allocator, d: datum_mod.Datum) std.mem.Allocator.Error!Value {
+    return switch (d) {
+        .integer => |n| .{ .integer = n },
+        .boolean => |b| .{ .boolean = b },
+        .symbol => |s| .{ .symbol = try arena.dupe(u8, s) },
+        .string => |s| .{ .string = try arena.dupe(u8, s) },
+        .empty_list => .empty_list,
+        .pair => |p| blk: {
+            const out = try arena.create(Value.Pair);
+            out.* = .{
+                .car = try fromDatum(arena, p.car),
+                .cdr = try fromDatum(arena, p.cdr),
+            };
+            break :blk .{ .pair = out };
+        },
+    };
+}
+
+// -- tests --------------------------------------------------------------
+
+const reader_mod = @import("reader.zig");
+
+test "fromDatum converts structure and copies bytes" {
+    var datum_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    var value_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer value_arena.deinit();
+
+    var r = reader_mod.Reader.init(datum_arena.allocator(), "(1 #t \"s\" foo ())", 8);
+    const v = try fromDatum(value_arena.allocator(), (try r.read()).?);
+
+    // Free the datum arena: the Value must not reference it.
+    datum_arena.deinit();
+
+    try std.testing.expectEqual(@as(i64, 1), v.pair.car.integer);
+    const rest = v.pair.cdr;
+    try std.testing.expectEqual(true, rest.pair.car.boolean);
+    try std.testing.expectEqualStrings("s", rest.pair.cdr.pair.car.string);
+    try std.testing.expectEqualStrings("foo", rest.pair.cdr.pair.cdr.pair.car.symbol);
+    try std.testing.expectEqual(Value.empty_list, rest.pair.cdr.pair.cdr.pair.cdr.pair.car);
+}
+
+test "unspecified exists only as a Value" {
+    const v: Value = .unspecified;
+    try std.testing.expect(v == .unspecified);
+}
