@@ -53,6 +53,15 @@ pub const Reader = struct {
                 return try datum_mod.symbol(r.arena, text);
             },
             .string => return .{ .string = try r.decodeString(tok) },
+            .quote => {
+                // 'd reads as (quote d); the quoted datum sits one level deeper.
+                if (depth + 1 > r.max_depth) return error.DepthLimitExceeded;
+                const next = r.lexer.next();
+                if (next.tag == .eof) return error.UnexpectedEndOfInput;
+                const quoted = try r.datum(next, depth + 1);
+                const tail = try datum_mod.cons(r.arena, quoted, .empty_list);
+                return try datum_mod.cons(r.arena, try datum_mod.symbol(r.arena, "quote"), tail);
+            },
             .lparen => return try r.list(depth + 1),
             .rparen => return error.UnexpectedRightParen,
             .invalid => return error.InvalidToken,
@@ -162,6 +171,32 @@ test "depth limit" {
     var t2 = TestReader.init();
     defer t2.deinit();
     _ = (try t2.start("(((1)))", 3).read()).?; // exactly at the limit is fine
+}
+
+test "quote expands to (quote d)" {
+    var t = TestReader.init();
+    defer t.deinit();
+    const r = t.start("'x ''y", 8);
+
+    const d = (try r.read()).?;
+    try std.testing.expectEqualStrings("quote", d.pair.car.symbol);
+    try std.testing.expectEqualStrings("x", d.pair.cdr.pair.car.symbol);
+    try std.testing.expectEqual(Datum.empty_list, d.pair.cdr.pair.cdr);
+
+    // ''y == (quote (quote y))
+    const dd = (try r.read()).?;
+    try std.testing.expectEqualStrings("quote", dd.pair.car.symbol);
+    try std.testing.expectEqualStrings("quote", dd.pair.cdr.pair.car.pair.car.symbol);
+}
+
+test "quote respects the depth limit and eof" {
+    var t = TestReader.init();
+    defer t.deinit();
+    try std.testing.expectError(error.DepthLimitExceeded, t.start("''''x", 3).read());
+
+    var t2 = TestReader.init();
+    defer t2.deinit();
+    try std.testing.expectError(error.UnexpectedEndOfInput, t2.start("'", 8).read());
 }
 
 test "syntax errors" {

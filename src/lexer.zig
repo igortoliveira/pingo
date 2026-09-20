@@ -11,6 +11,7 @@ pub const Token = struct {
     pub const Tag = enum {
         lparen,
         rparen,
+        quote, // '
         integer,
         symbol,
         boolean, // #t or #f; which one is in the source text
@@ -42,6 +43,7 @@ pub const Lexer = struct {
         switch (l.src[l.pos]) {
             '(' => return l.single(.lparen, start),
             ')' => return l.single(.rparen, start),
+            '\'' => return l.single(.quote, start),
             '0'...'9' => return l.integer(start),
             '-', '+' => {
                 if (l.pos + 1 < l.src.len and isDigit(l.src[l.pos + 1])) {
@@ -205,6 +207,10 @@ test "string escapes" {
 test "unterminated string is invalid, not a hang" {
     try expectTokens("\"abc", &.{.invalid});
     try expectTokens("\"abc\\", &.{.invalid});
+}
+
+test "quote" {
+    try expectTokens("'x '(1 2)", &.{ .quote, .symbol, .quote, .lparen, .integer, .integer, .rparen });
 }
 
 test "comments run to end of line" {
