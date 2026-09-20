@@ -6,6 +6,7 @@ pub const version = "0.0.0";
 
 pub const lexer = @import("lexer.zig");
 pub const datum = @import("datum.zig");
+pub const reader = @import("reader.zig");
 
 test {
     std.testing.refAllDecls(@This());
