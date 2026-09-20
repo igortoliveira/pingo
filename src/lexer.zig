@@ -12,6 +12,8 @@ pub const Token = struct {
         lparen,
         rparen,
         integer,
+        symbol,
+        boolean, // #t or #f; which one is in the source text
         invalid,
         eof,
     };
@@ -34,14 +36,18 @@ pub const Lexer = struct {
             '(' => return l.single(.lparen, start),
             ')' => return l.single(.rparen, start),
             '0'...'9' => return l.integer(start),
-            '-' => {
+            '-', '+' => {
                 if (l.pos + 1 < l.src.len and isDigit(l.src[l.pos + 1])) {
                     l.pos += 1;
                     return l.integer(start);
                 }
+                return l.symbol(start);
+            },
+            '#' => return l.boolean(start),
+            else => {
+                if (isSymbolInitial(l.src[l.pos])) return l.symbol(start);
                 return l.single(.invalid, start);
             },
-            else => return l.single(.invalid, start),
         }
     }
 
@@ -54,6 +60,23 @@ pub const Lexer = struct {
         while (l.pos < l.src.len and isDigit(l.src[l.pos])) l.pos += 1;
         return .{ .tag = .integer, .start = start, .end = l.pos };
     }
+
+    fn symbol(l: *Lexer, start: usize) Token {
+        while (l.pos < l.src.len and isSymbolChar(l.src[l.pos])) l.pos += 1;
+        return .{ .tag = .symbol, .start = start, .end = l.pos };
+    }
+
+    fn boolean(l: *Lexer, start: usize) Token {
+        l.pos += 1; // consume '#'
+        if (l.pos < l.src.len and (l.src[l.pos] == 't' or l.src[l.pos] == 'f')) {
+            l.pos += 1;
+            if (l.pos >= l.src.len or isDelimiter(l.src[l.pos]))
+                return .{ .tag = .boolean, .start = start, .end = l.pos };
+        }
+        // Not #t/#f followed by a delimiter: consume the run so lexing resumes cleanly.
+        while (l.pos < l.src.len and isSymbolChar(l.src[l.pos])) l.pos += 1;
+        return .{ .tag = .invalid, .start = start, .end = l.pos };
+    }
 };
 
 fn isWhitespace(c: u8) bool {
@@ -62,6 +85,22 @@ fn isWhitespace(c: u8) bool {
 
 fn isDigit(c: u8) bool {
     return c >= '0' and c <= '9';
+}
+
+fn isDelimiter(c: u8) bool {
+    return isWhitespace(c) or c == '(' or c == ')';
+}
+
+fn isSymbolInitial(c: u8) bool {
+    return switch (c) {
+        'a'...'z', 'A'...'Z' => true,
+        '!', '$', '%', '&', '*', '+', '-', '.', '/', ':', '<', '=', '>', '?', '^', '_', '~' => true,
+        else => false,
+    };
+}
+
+fn isSymbolChar(c: u8) bool {
+    return isSymbolInitial(c) or isDigit(c);
 }
 
 fn expectTokens(src: []const u8, expected: []const Token.Tag) !void {
@@ -76,9 +115,8 @@ test "parens and integers" {
     });
 }
 
-test "negative integers and lone minus" {
+test "negative integers" {
     try expectTokens("-42", &.{.integer});
-    try expectTokens("-", &.{.invalid});
 }
 
 test "token positions slice the source" {
@@ -96,4 +134,29 @@ test "eof is stable" {
 
 test "unknown byte is invalid, lexing continues" {
     try expectTokens("@ 7", &.{ .invalid, .integer });
+}
+
+test "symbols" {
+    try expectTokens("(+ foo bar-baz list->vector <=?)", &.{
+        .lparen, .symbol, .symbol, .symbol, .symbol, .symbol, .rparen,
+    });
+}
+
+test "plus and minus: symbol alone, sign before digits" {
+    try expectTokens("+ -", &.{ .symbol, .symbol });
+    try expectTokens("+1 -1", &.{ .integer, .integer });
+}
+
+test "booleans" {
+    try expectTokens("#t #f (#t)", &.{ .boolean, .boolean, .lparen, .boolean, .rparen });
+}
+
+test "malformed hash forms are invalid" {
+    try expectTokens("#true", &.{.invalid});
+    try expectTokens("#x #", &.{ .invalid, .invalid });
+}
+
+test "symbols cannot start with a digit run" {
+    // "1abc" lexes as integer then symbol; the reader will reject the sequence later.
+    try expectTokens("1abc", &.{ .integer, .symbol });
 }
