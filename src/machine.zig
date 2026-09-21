@@ -1640,6 +1640,12 @@ test "differential: machine and oracle agree on a form corpus" {
         "(define-syntax k (syntax-rules () ((_) 42))) (k)",
         "(define-syntax pick (syntax-rules (else) ((_ else x) x) ((_ y x) y))) (pick else 9)",
         "(define-syntax only2 (syntax-rules () ((_ a b) (+ a b)))) (only2 1)",
+        // syntax-rules ellipsis (8I.3): variadic, parallel, tail, nested
+        "(define-syntax ml (syntax-rules () ((_ x ...) (list x ...)))) (ml 1 2 3)",
+        "(define-syntax ml (syntax-rules () ((_ x ...) (list x ...)))) (ml)",
+        "(define-syntax mlet (syntax-rules () ((_ ((n v) ...) b ...) ((lambda (n ...) b ...) v ...)))) (mlet ((a 1) (b 2)) (+ a b))",
+        "(define-syntax lastf (syntax-rules () ((_ a r ... z) (list z r ... a)))) (lastf 1 2 3 4 5)",
+        "(define-syntax nn (syntax-rules () ((_ (a ...) ...) (list (list a ...) ...)))) (nn (1 2) (3) ())",
         // internal defines (8H'.2): a body opening with defines is a letrec
         "((lambda () (define x 1) (define (f n) (if (= n 0) x (f (- n 1)))) (f 3)))",
         "(define (parity n) (define (e? k) (if (= k 0) #t (o? (- k 1)))) (define (o? k) (if (= k 0) #f (e? (- k 1)))) (e? n)) (parity 10)",
