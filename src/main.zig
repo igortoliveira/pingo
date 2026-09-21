@@ -55,9 +55,28 @@ fn parseTool(spec: []const u8) ?SimTool {
     };
 }
 
+/// Serves recorded results (docs/host.md): FIFO per (name, args) key via the
+/// replay table; an exhausted or unrecorded key is a host-error. No real
+/// handler runs on replay.
+const ReplayTool = struct {
+    cap: pingo.capability.Capability,
+    latency_ms: u64,
+    replay: *pingo.trace.Replay,
+
+    fn handle(ctx: *anyopaque, arena: std.mem.Allocator, args: []const pingo.value.Value) pingo.capability.HostError!pingo.value.Value {
+        const tool: *ReplayTool = @ptrCast(@alignCast(ctx));
+        const served = (try tool.replay.next(arena, tool.cap.name, args)) orelse return error.HostError;
+        return switch (served) {
+            .ok => |v| v,
+            .failure => error.HostError,
+        };
+    }
+};
+
 const usage =
-    \\usage: pingo [file.scm] [--tool name[:class[:latency_ms]]]... [--trace] [--record file]
+    \\usage: pingo [file.scm] [--tool name[:class[:latency_ms]]]... [--trace] [--record file] [--replay file]
     \\  classes: pure | independent | resource | ordered | irreversible
+    \\  --replay reconstructs the tools from the trace; it excludes --tool
     \\
 ;
 
@@ -72,6 +91,7 @@ pub fn main(init: std.process.Init) !void {
     var tools: std.ArrayList(SimTool) = .empty;
     var trace = false;
     var record_path: ?[]const u8 = null;
+    var replay_path: ?[]const u8 = null;
     var i: usize = 1;
     while (i < args.len) : (i += 1) {
         if (std.mem.eql(u8, args[i], "--trace")) {
@@ -84,6 +104,14 @@ pub fn main(init: std.process.Init) !void {
                 return;
             }
             record_path = args[i];
+        } else if (std.mem.eql(u8, args[i], "--replay")) {
+            i += 1;
+            if (i >= args.len) {
+                try out.writeAll(usage);
+                try out.flush();
+                return;
+            }
+            replay_path = args[i];
         } else if (std.mem.eql(u8, args[i], "--tool")) {
             i += 1;
             const tool = if (i < args.len) parseTool(args[i]) else null;
@@ -103,7 +131,12 @@ pub fn main(init: std.process.Init) !void {
         }
     }
 
-    if (file_path) |path| return runFile(init, out, path, tools.items, trace, record_path);
+    if (replay_path != null and tools.items.len > 0) {
+        try out.writeAll(usage);
+        try out.flush();
+        return;
+    }
+    if (file_path) |path| return runFile(init, out, path, tools.items, trace, record_path, replay_path);
     return repl(init, out);
 }
 
@@ -111,7 +144,7 @@ pub fn main(init: std.process.Init) !void {
 /// Simulated tools complete on a virtual clock — the call with the earliest
 /// completion settles first — so the trace and the final report show real
 /// dispatch overlap without any real waiting.
-fn runFile(init: std.process.Init, out: *std.Io.Writer, path: []const u8, tools: []SimTool, trace: bool, record_path: ?[]const u8) !void {
+fn runFile(init: std.process.Init, out: *std.Io.Writer, path: []const u8, tools: []SimTool, trace: bool, record_path: ?[]const u8, replay_path: ?[]const u8) !void {
     var session_arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer session_arena_state.deinit();
     var session_heap = pingo.limits.LimitedAllocator.init(session_arena_state.allocator(), repl_heap_bytes);
@@ -131,6 +164,29 @@ fn runFile(init: std.process.Init, out: *std.Io.Writer, path: []const u8, tools:
         try pingo.capability.register(machine.global, &tool.cap);
     }
 
+    // Replay reconstructs the tools from the trace headers (docs/host.md):
+    // no --tool flags, no real handlers, results served from the table.
+    var replay_storage: pingo.trace.Replay = undefined;
+    var replay_tools: []ReplayTool = &.{};
+    if (replay_path) |rp| {
+        const trace_src = try readWholeFile(init, out, rp, session_arena);
+        replay_storage = pingo.trace.parse(session_arena, trace_src) catch |err| {
+            try out.print("invalid trace {s}: {s}\n", .{ rp, @errorName(err) });
+            try out.flush();
+            std.process.exit(1);
+        };
+        replay_tools = try session_arena.alloc(ReplayTool, replay_storage.tools.len);
+        for (replay_storage.tools, replay_tools) |spec, *rt| {
+            rt.* = .{
+                .cap = .{ .name = spec.name, .class = spec.class, .ctx = undefined, .handler = ReplayTool.handle },
+                .latency_ms = spec.latency_ms,
+                .replay = &replay_storage,
+            };
+            rt.cap.ctx = rt;
+            try pingo.capability.register(machine.global, &rt.cap);
+        }
+    }
+
     // Recording taps the settle funnel (docs/host.md): headers now, one
     // `(call ...)` line per settle below.
     var record_buffer: [4096]u8 = undefined;
@@ -144,19 +200,12 @@ fn runFile(init: std.process.Init, out: *std.Io.Writer, path: []const u8, tools:
         record_writer = .init(f, init.io, &record_buffer);
         for (tools) |*tool|
             try pingo.trace.writeTool(&record_writer.?.interface, tool.cap.name, tool.cap.class, tool.latency_ms);
+        for (replay_tools) |*tool|
+            try pingo.trace.writeTool(&record_writer.?.interface, tool.cap.name, tool.cap.class, tool.latency_ms);
     }
     defer if (record_writer) |*rw| rw.file.close(init.io);
 
-    const file = std.Io.Dir.cwd().openFile(init.io, path, .{}) catch |err| {
-        try out.print("cannot open {s}: {s}\n", .{ path, @errorName(err) });
-        try out.flush();
-        std.process.exit(1);
-    };
-    defer file.close(init.io);
-    var read_buffer: [4096]u8 = undefined;
-    var file_reader: std.Io.File.Reader = .init(file, init.io, &read_buffer);
-    const src = try file_reader.interface.allocRemaining(session_arena, .limited(max_file_bytes));
-
+    const src = try readWholeFile(init, out, path, session_arena);
     var reader = pingo.reader.Reader.init(session_arena, src, max_read_depth);
 
     // virtual clock state
@@ -185,7 +234,7 @@ fn runFile(init: std.process.Init, out: *std.Io.Writer, path: []const u8, tools:
                 var known = false;
                 for (in_flight.items) |f| known = known or f.p == p;
                 if (known) continue;
-                const latency = latencyOf(tools, p.capability);
+                const latency = latencyOf(tools, replay_tools, p.capability);
                 seq_sum += latency;
                 try in_flight.append(session_arena, .{ .p = p, .done_at = clock + latency });
                 if (trace) {
@@ -246,9 +295,22 @@ fn runFile(init: std.process.Init, out: *std.Io.Writer, path: []const u8, tools:
     if (failed) std.process.exit(1);
 }
 
-fn latencyOf(tools: []const SimTool, cap: *const pingo.capability.Capability) u64 {
+fn latencyOf(tools: []const SimTool, replay_tools: []const ReplayTool, cap: *const pingo.capability.Capability) u64 {
     for (tools) |*tool| if (&tool.cap == cap) return tool.latency_ms;
+    for (replay_tools) |*tool| if (&tool.cap == cap) return tool.latency_ms;
     return 0; // e.g. print
+}
+
+fn readWholeFile(init: std.process.Init, out: *std.Io.Writer, path: []const u8, arena: std.mem.Allocator) ![]u8 {
+    const file = std.Io.Dir.cwd().openFile(init.io, path, .{}) catch |err| {
+        try out.print("cannot open {s}: {s}\n", .{ path, @errorName(err) });
+        try out.flush();
+        std.process.exit(1);
+    };
+    defer file.close(init.io);
+    var read_buffer: [4096]u8 = undefined;
+    var file_reader: std.Io.File.Reader = .init(file, init.io, &read_buffer);
+    return file_reader.interface.allocRemaining(arena, .limited(max_file_bytes));
 }
 
 fn writeArgs(out: *std.Io.Writer, args: []const pingo.value.Value) !void {
