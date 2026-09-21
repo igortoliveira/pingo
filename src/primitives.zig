@@ -71,7 +71,73 @@ const table = [_]Value.Primitive{
     .{ .name = "round", .func = roundFn },
     .{ .name = "set-car!", .func = setCar },
     .{ .name = "set-cdr!", .func = setCdr },
+    .{ .name = "char?", .func = isChar },
+    .{ .name = "char->integer", .func = charToInt },
+    .{ .name = "integer->char", .func = intToChar },
+    .{ .name = "char-upcase", .func = charUpcase },
+    .{ .name = "char-downcase", .func = charDowncase },
+    .{ .name = "char-alphabetic?", .func = charAlpha },
+    .{ .name = "char-numeric?", .func = charNumeric },
+    .{ .name = "char-whitespace?", .func = charWhitespace },
+    .{ .name = "char-upper-case?", .func = charUpper },
+    .{ .name = "char-lower-case?", .func = charLower },
 };
+
+fn asChar(v: Value) PrimitiveError!u8 {
+    return if (v == .char) v.char else error.TypeError;
+}
+
+fn isChar(_: std.mem.Allocator, args: []const Value) PrimitiveError!Value {
+    try exactly(args, 1);
+    return .{ .boolean = args[0] == .char };
+}
+
+fn charToInt(_: std.mem.Allocator, args: []const Value) PrimitiveError!Value {
+    try exactly(args, 1);
+    return .{ .integer = try asChar(args[0]) };
+}
+
+fn intToChar(_: std.mem.Allocator, args: []const Value) PrimitiveError!Value {
+    try exactly(args, 1);
+    const n = try asInt(args[0]);
+    if (n < 0 or n > 255) return error.TypeError; // chars are bytes (§1)
+    return .{ .char = @intCast(n) };
+}
+
+fn charUpcase(_: std.mem.Allocator, args: []const Value) PrimitiveError!Value {
+    try exactly(args, 1);
+    return .{ .char = std.ascii.toUpper(try asChar(args[0])) };
+}
+
+fn charDowncase(_: std.mem.Allocator, args: []const Value) PrimitiveError!Value {
+    try exactly(args, 1);
+    return .{ .char = std.ascii.toLower(try asChar(args[0])) };
+}
+
+fn charPred(args: []const Value, comptime f: fn (u8) bool) PrimitiveError!Value {
+    try exactly(args, 1);
+    return .{ .boolean = f(try asChar(args[0])) };
+}
+
+fn charAlpha(_: std.mem.Allocator, args: []const Value) PrimitiveError!Value {
+    return charPred(args, std.ascii.isAlphabetic);
+}
+
+fn charNumeric(_: std.mem.Allocator, args: []const Value) PrimitiveError!Value {
+    return charPred(args, std.ascii.isDigit);
+}
+
+fn charWhitespace(_: std.mem.Allocator, args: []const Value) PrimitiveError!Value {
+    return charPred(args, std.ascii.isWhitespace);
+}
+
+fn charUpper(_: std.mem.Allocator, args: []const Value) PrimitiveError!Value {
+    return charPred(args, std.ascii.isUpper);
+}
+
+fn charLower(_: std.mem.Allocator, args: []const Value) PrimitiveError!Value {
+    return charPred(args, std.ascii.isLower);
+}
 
 fn setCar(_: std.mem.Allocator, args: []const Value) PrimitiveError!Value {
     try exactly(args, 2);

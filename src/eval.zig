@@ -643,7 +643,8 @@ test "tail calls do not consume depth" {
 test "heap budget stops a heap bomb as limit-exceeded" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
-    var heap = limits_mod.LimitedAllocator.init(arena_state.allocator(), 64 * 1024);
+    // generous enough for init + the growing prelude; tiny next to the bomb
+    var heap = limits_mod.LimitedAllocator.init(arena_state.allocator(), 2 * 1024 * 1024);
     const arena = heap.allocator();
 
     var evaluator = try Evaluator.init(arena, TestSession.test_limits);

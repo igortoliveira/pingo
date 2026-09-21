@@ -1209,6 +1209,15 @@ test "differential: machine and oracle agree on a form corpus" {
         "(eqv? #\\a #\\a)",
         "(eqv? #\\a #\\b)",
         "(eqv? #\\a 'a)",
+        // char library (8D.3)
+        "(list (char? #\\a) (char? 97))",
+        "(char->integer #\\a)",
+        "(integer->char 65)",
+        "(integer->char 300)",
+        "(list (char-upcase #\\a) (char-downcase #\\Z))",
+        "(list (char-alphabetic? #\\a) (char-numeric? #\\7) (char-whitespace? #\\space))",
+        "(list (char<? #\\a #\\b #\\c) (char<? #\\b #\\a))",
+        "(char-ci=? #\\A #\\a)",
         // cond/and/or (7.3): short-circuit means untaken positions may be unbound
         "(cond (#f 1) ((eq? 1 1) 'hit) (else 'miss))",
         "(cond (#f 1))",
