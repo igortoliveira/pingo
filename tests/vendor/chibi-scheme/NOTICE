@@ -1,0 +1,12 @@
+Provenance
+==========
+
+File:    r5rs-tests.scm
+Origin:  https://github.com/ashinn/chibi-scheme/blob/master/tests/r5rs-tests.scm
+Commit:  a2e383f685d23992a6a307fc61544b07e5843cbe (master at vendoring time)
+Fetched: 2026-09-20
+License: BSD 3-Clause, Copyright (c) 2009-2021 Alex Shinn
+         (see LICENSE in this directory, copied from the repository's COPYING)
+
+The vendored file is never modified. Any adaptation needed by Pingo's
+conformance harness lives in the harness, not here.
