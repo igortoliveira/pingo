@@ -13,7 +13,7 @@ const Value = pingo.value.Value;
 
 const suite = @embedFile("vendor/chibi-scheme/r5rs-tests.scm");
 
-const special_forms = [_][]const u8{ "quote", "if", "define", "lambda", "begin", "let", "let*", "letrec", "cond", "and", "or", "else" };
+const special_forms = [_][]const u8{ "quote", "if", "define", "lambda", "begin", "let", "let*", "letrec", "do", "cond", "and", "or", "else" };
 
 pub fn main(init: std.process.Init) !void {
     var stdout_buffer: [4096]u8 = undefined;
@@ -145,6 +145,33 @@ fn check(
         },
         .pair => |p| {
             if (p.car == .symbol and std.mem.eql(u8, p.car.symbol, "quote")) return true;
+            if (p.car == .symbol and std.mem.eql(u8, p.car.symbol, "do") and
+                p.cdr == .pair and p.cdr.pair.cdr == .pair)
+            {
+                const before = bound.items.len;
+                defer bound.shrinkRetainingCapacity(before);
+                var specs = p.cdr.pair.car;
+                while (specs == .pair) : (specs = specs.pair.cdr) {
+                    const spec = specs.pair.car;
+                    if (spec != .pair or spec.pair.car != .symbol) return false;
+                    if (spec.pair.cdr == .pair)
+                        if (!try check(arena, spec.pair.cdr.pair.car, evaluator, bound)) return false;
+                }
+                specs = p.cdr.pair.car;
+                while (specs == .pair) : (specs = specs.pair.cdr)
+                    try bound.append(arena, specs.pair.car.pair.car.symbol);
+                // steps, the exit clause, and the commands all see the names
+                specs = p.cdr.pair.car;
+                while (specs == .pair) : (specs = specs.pair.cdr) {
+                    const spec = specs.pair.car;
+                    if (spec.pair.cdr == .pair and spec.pair.cdr.pair.cdr == .pair)
+                        if (!try check(arena, spec.pair.cdr.pair.cdr.pair.car, evaluator, bound)) return false;
+                }
+                var rest2 = p.cdr.pair.cdr;
+                while (rest2 == .pair) : (rest2 = rest2.pair.cdr)
+                    if (!try check(arena, rest2.pair.car, evaluator, bound)) return false;
+                return true;
+            }
             if (p.car == .symbol and std.mem.eql(u8, p.car.symbol, "letrec") and p.cdr == .pair) {
                 const before = bound.items.len;
                 defer bound.shrinkRetainingCapacity(before);

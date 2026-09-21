@@ -81,6 +81,72 @@ pub fn expandLetStar(arena: std.mem.Allocator, form: Datum) Error!Datum {
     return try listOf(arena, &.{ try datum_mod.symbol(arena, "let"), first, inner });
 }
 
+/// `(do ((n init [step]) ...) (test res ...) cmd ...)` → a named-let-style
+/// loop over an unreadable loop symbol; a missing step keeps the variable.
+pub fn expandDo(arena: std.mem.Allocator, form: Datum) Error!Datum {
+    if (form != .pair or form.pair.cdr != .pair) return error.BadSyntax;
+    const exit_clause = form.pair.cdr.pair.car;
+    if (exit_clause != .pair) return error.BadSyntax;
+    const cmds = form.pair.cdr.pair.cdr;
+
+    var bindings: Datum = .empty_list;
+    var steps: std.ArrayList(Datum) = .empty;
+    defer steps.deinit(arena);
+    {
+        // walk the specs twice: once to validate/collect, building backwards
+        var specs: std.ArrayList(Datum) = .empty;
+        defer specs.deinit(arena);
+        var b = form.pair.car;
+        while (b == .pair) : (b = b.pair.cdr) try specs.append(arena, b.pair.car);
+        if (b != .empty_list) return error.BadSyntax;
+
+        var i = specs.items.len;
+        while (i > 0) {
+            i -= 1;
+            const spec = specs.items[i];
+            if (spec != .pair or spec.pair.car != .symbol or spec.pair.cdr != .pair)
+                return error.BadSyntax;
+            const name = spec.pair.car;
+            const init = spec.pair.cdr.pair.car;
+            const step: Datum = switch (spec.pair.cdr.pair.cdr) {
+                .empty_list => name, // no step: the variable carries over
+                .pair => |s| if (s.cdr == .empty_list) s.car else return error.BadSyntax,
+                else => return error.BadSyntax,
+            };
+            bindings = try datum_mod.cons(arena, try listOf(arena, &.{ name, init }), bindings);
+            try steps.insert(arena, 0, step);
+        }
+    }
+
+    const loop = try datum_mod.symbol(arena, " do-loop");
+    const recur = try datum_mod.cons(arena, loop, try listFrom(arena, steps.items));
+    const loop_body = switch (cmds) {
+        .empty_list => recur,
+        .pair => try datum_mod.cons(arena, try datum_mod.symbol(arena, "begin"), try appendDatum(arena, cmds, recur)),
+        else => return error.BadSyntax,
+    };
+    const result: Datum = switch (exit_clause.pair.cdr) {
+        .empty_list => try listOf(arena, &.{ try datum_mod.symbol(arena, "if"), .{ .boolean = false }, .{ .boolean = false } }),
+        .pair => |r| try beginOf(arena, .{ .pair = r }),
+        else => return error.BadSyntax,
+    };
+    const if_form = try listOf(arena, &.{
+        try datum_mod.symbol(arena, "if"), exit_clause.pair.car, result, loop_body,
+    });
+    return try listOf(arena, &.{ try datum_mod.symbol(arena, "let"), loop, bindings, if_form });
+}
+
+/// Copies proper list `xs` with `last` appended as the final element.
+fn appendDatum(arena: std.mem.Allocator, xs: Datum, last: Datum) Error!Datum {
+    var items: std.ArrayList(Datum) = .empty;
+    defer items.deinit(arena);
+    var rest = xs;
+    while (rest == .pair) : (rest = rest.pair.cdr) try items.append(arena, rest.pair.car);
+    if (rest != .empty_list) return error.BadSyntax;
+    try items.append(arena, last);
+    return listFrom(arena, items.items);
+}
+
 /// `(cond (c e ...) ... [(else e ...)])` → nested `if`s. Each clause needs at
 /// least one expression after its test; `else` must be last. No matching
 /// clause yields unspecified (expansion target: `(if #f #f)`).
@@ -240,6 +306,19 @@ test "named let expands to letrec" {
         expandLet,
         "(let loop ((n 3) (acc 1)) (if (= n 0) acc (loop (- n 1) (* acc n))))",
         "(letrec ((loop (lambda (n acc) (if (= n 0) acc (loop (- n 1) (* acc n)))))) (loop 3 1))",
+    );
+}
+
+test "do expands to a loop" {
+    try expectExpansion(
+        expandDo,
+        "(do ((i 0 (+ i 1)) (acc 1)) ((= i 3) acc) 42)",
+        "(let  do-loop ((i 0) (acc 1)) (if (= i 3) acc (begin 42 ( do-loop (+ i 1) acc))))",
+    );
+    try expectExpansion(
+        expandDo,
+        "(do ((i 0 (+ i 1))) ((= i 3)))",
+        "(let  do-loop ((i 0)) (if (= i 3) (if #f #f) ( do-loop (+ i 1))))",
     );
 }
 
