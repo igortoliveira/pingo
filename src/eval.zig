@@ -6,6 +6,7 @@ const std = @import("std");
 const datum_mod = @import("datum.zig");
 const value_mod = @import("value.zig");
 const env_mod = @import("env.zig");
+const primitives = @import("primitives.zig");
 
 const Datum = datum_mod.Datum;
 const Value = value_mod.Value;
@@ -16,6 +17,9 @@ pub const Error = error{
     UnboundVariable,
     NotAProcedure,
     ArityMismatch,
+    TypeError,
+    DivideByZero,
+    IntegerOverflow,
     Unsupported, // placeholder for plan items not landed yet
     OutOfMemory,
 };
@@ -26,7 +30,9 @@ pub const Evaluator = struct {
     global: *Env,
 
     pub fn init(arena: std.mem.Allocator) std.mem.Allocator.Error!Evaluator {
-        return .{ .arena = arena, .global = try Env.init(arena, null) };
+        const global = try Env.init(arena, null);
+        try primitives.install(global);
+        return .{ .arena = arena, .global = global };
     }
 
     /// Entry point for programs/REPL lines: only here `define` is legal (§2).
@@ -134,6 +140,7 @@ pub const Evaluator = struct {
                 for (c.body) |bd| result = try e.eval(bd, child);
                 return result;
             },
+            .primitive => |p| return p.func(e.arena, args),
             else => return Error.NotAProcedure,
         }
     }
@@ -275,6 +282,39 @@ test "lambda syntax errors" {
     try std.testing.expectError(error.BadSyntax, s.run("(lambda (x))")); // empty body
     try std.testing.expectError(error.BadSyntax, s.run("(lambda (1) x)"));
     try std.testing.expectError(error.BadSyntax, s.run("(lambda (x x) x)")); // dup param
+}
+
+test "arithmetic" {
+    var s = TestSession.init();
+    defer s.deinit();
+    try std.testing.expectEqual(@as(i64, 6), (try s.run("(+ 1 2 3)")).integer);
+    try std.testing.expectEqual(@as(i64, 0), (try s.run("(+)")).integer);
+    try std.testing.expectEqual(@as(i64, -1), (try s.run("(- 2 3)")).integer);
+    try std.testing.expectEqual(@as(i64, -5), (try s.run("(- 5)")).integer);
+    try std.testing.expectEqual(@as(i64, 24), (try s.run("(* 2 3 4)")).integer);
+    try std.testing.expectEqual(@as(i64, 1), (try s.run("(*)")).integer);
+    try std.testing.expectEqual(@as(i64, 3), (try s.run("(/ 7 2)")).integer);
+    try std.testing.expectEqual(@as(i64, -3), (try s.run("(/ -7 2)")).integer); // truncating
+    try std.testing.expectEqual(@as(i64, 7), (try s.run("((lambda (x) (+ x 3)) 4)")).integer);
+}
+
+test "arithmetic errors follow §3" {
+    var s = TestSession.init();
+    defer s.deinit();
+    try std.testing.expectError(error.DivideByZero, s.run("(/ 1 0)"));
+    try std.testing.expectError(error.TypeError, s.run("(+ 1 #t)"));
+    try std.testing.expectError(error.ArityMismatch, s.run("(-)"));
+    try std.testing.expectError(error.ArityMismatch, s.run("(/ 1)"));
+    try std.testing.expectError(error.IntegerOverflow, s.run("(+ 9223372036854775807 1)"));
+    try std.testing.expectError(error.IntegerOverflow, s.run("(- -9223372036854775808)"));
+    try std.testing.expectError(error.IntegerOverflow, s.run("(/ -9223372036854775808 -1)"));
+}
+
+test "primitives are first-class values" {
+    var s = TestSession.init();
+    defer s.deinit();
+    _ = try s.run("(define apply2 (lambda (f a b) (f a b)))");
+    try std.testing.expectEqual(@as(i64, 5), (try s.run("(apply2 + 2 3)")).integer);
 }
 
 test "define binds, returns unspecified, and persists" {

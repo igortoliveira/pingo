@@ -10,6 +10,16 @@ const std = @import("std");
 const datum_mod = @import("datum.zig");
 const env_mod = @import("env.zig");
 
+/// Errors a primitive may raise; a subset of the evaluator's error set
+/// (defined here so value.zig doesn't depend on eval.zig).
+pub const PrimitiveError = error{
+    TypeError,
+    DivideByZero,
+    IntegerOverflow,
+    ArityMismatch,
+    OutOfMemory,
+};
+
 pub const Value = union(enum) {
     integer: i64,
     boolean: bool,
@@ -19,9 +29,14 @@ pub const Value = union(enum) {
     empty_list,
     unspecified,
     closure: *Closure,
-    // The primitive variant lands with the first primitives (plan 3.7).
+    primitive: *const Primitive,
 
     pub const Pair = struct { car: Value, cdr: Value };
+
+    pub const Primitive = struct {
+        name: []const u8,
+        func: *const fn (arena: std.mem.Allocator, args: []const Value) PrimitiveError!Value,
+    };
 
     pub const Closure = struct {
         params: []const []const u8,
