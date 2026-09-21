@@ -1195,6 +1195,13 @@ test "differential: machine and oracle agree on a form corpus" {
         "(set! nope 1)",
         "(set! 3 1)",
         "(set!)",
+        // pair mutation (8C.4) — including guest-made cycles hitting walkers
+        "(define p (cons 1 2)) (set-car! p 10) (set-cdr! p 20) p",
+        "(define q (list 1 2 3)) (set-car! (cdr q) 'two) q",
+        "(set-car! 5 1)",
+        "(define c (list 1 2)) (set-cdr! (cdr c) c) (list? c)",
+        "(define c2 (list 1 2)) (set-cdr! (cdr c2) c2) (length c2)",
+        "(define c3 (list 1 2)) (set-cdr! (cdr c3) c3) (equal? c3 c3)",
         // cond/and/or (7.3): short-circuit means untaken positions may be unbound
         "(cond (#f 1) ((eq? 1 1) 'hit) (else 'miss))",
         "(cond (#f 1))",

@@ -67,7 +67,7 @@ pub fn main(init: std.process.Init) !void {
     if (fail > 0) std.process.exit(1);
     // Regression floor: raise this whenever new features convert skips to
     // passes; a drop means a feature silently stopped being recognized.
-    const pass_floor = 110;
+    const pass_floor = 115;
     if (pass < pass_floor) {
         std.debug.print("conformance: pass count {d} fell below the floor {d}\n", .{ pass, pass_floor });
         std.process.exit(1);

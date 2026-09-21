@@ -69,7 +69,23 @@ const table = [_]Value.Primitive{
     .{ .name = "ceiling", .func = ceilingFn },
     .{ .name = "truncate", .func = truncateFn },
     .{ .name = "round", .func = roundFn },
+    .{ .name = "set-car!", .func = setCar },
+    .{ .name = "set-cdr!", .func = setCdr },
 };
+
+fn setCar(_: std.mem.Allocator, args: []const Value) PrimitiveError!Value {
+    try exactly(args, 2);
+    if (args[0] != .pair) return error.TypeError;
+    args[0].pair.car = args[1];
+    return .unspecified;
+}
+
+fn setCdr(_: std.mem.Allocator, args: []const Value) PrimitiveError!Value {
+    try exactly(args, 2);
+    if (args[0] != .pair) return error.TypeError;
+    args[0].pair.cdr = args[1];
+    return .unspecified;
+}
 
 fn intDiv2(args: []const Value, comptime f: fn (i64, i64) i64) PrimitiveError!Value {
     try exactly(args, 2);
