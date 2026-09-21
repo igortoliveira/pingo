@@ -19,23 +19,20 @@ pub const Error = eval_mod.Error;
 pub const Limits = eval_mod.Limits;
 pub const Diagnostic = eval_mod.Diagnostic;
 
-/// A capability call handed to the host (semantics §4): args are already
-/// evaluated and pure-data-checked. The machine stays alive, waiting for
-/// `resumeWithValue`/`resumeWithError`.
-pub const Suspension = struct {
-    capability: *const capability_mod.Capability,
-    args: []const Value,
-};
+pub const Pending = Value.Pending;
 
 pub const Outcome = union(enum) {
     value: Value,
-    suspended: Suspension,
+    /// The machine cannot advance until the host resolves at least one of
+    /// `outstanding()`'s calls (in any order) and calls `continueRun`.
+    blocked,
 };
 
 const Control = union(enum) {
     expr: Expr,
     value: Value,
-    suspend_request: Suspension,
+    /// Strict wait on one pending call (§4 strictness points).
+    awaiting: *Pending,
 };
 
 const Expr = struct { d: Datum, env: *Env };
@@ -65,8 +62,9 @@ pub const Machine = struct {
     diagnostic: ?Diagnostic = null,
     frames: std.ArrayList(Frame) = .empty,
     control: Control = .{ .value = .unspecified },
-    /// Set while a suspension is outstanding; guards the host protocol.
-    suspended_on: ?*const capability_mod.Capability = null,
+    /// Calls dispatched and not yet settled by the host, in dispatch order
+    /// (the §6 observation sequence).
+    outstanding_calls: std.ArrayList(*Pending) = .empty,
 
     pub fn init(arena: std.mem.Allocator, limits: Limits) std.mem.Allocator.Error!Machine {
         const global = try Env.init(arena, null);
@@ -75,7 +73,10 @@ pub const Machine = struct {
     }
 
     pub fn evalToplevel(m: *Machine, d: Datum) Error!Outcome {
-        std.debug.assert(m.suspended_on == null); // host protocol: resume first
+        // Calls left over from a previous (failed) feed are abandoned: they
+        // were dispatched — that observation stands — but nothing waits on
+        // them anymore (§3 abort semantics).
+        m.outstanding_calls.clearRetainingCapacity();
         m.diagnostic = null;
         if (d == .pair and isForm(d.pair, "define")) {
             const args = d.pair.cdr;
@@ -87,44 +88,56 @@ pub const Machine = struct {
         return m.run(d, m.global, null);
     }
 
-    /// Host resumes the outstanding call with its result value.
-    pub fn resumeWithValue(m: *Machine, v: Value) Error!Outcome {
-        std.debug.assert(m.suspended_on != null); // host protocol: nothing to resume
-        const cap = m.suspended_on.?;
-        m.suspended_on = null;
-        if (!value_mod.isPureData(v)) {
-            m.diagnostic = .{ .context = cap.name };
-            return Error.HostError; // misbehaving host handler (§4)
+    /// Calls dispatched and not yet settled, in dispatch order.
+    pub fn outstanding(m: *const Machine) []const *Pending {
+        return m.outstanding_calls.items;
+    }
+
+    /// Host settles a call with its result. A result that is not pure data
+    /// (§4) marks the call failed instead — the failure surfaces when forced.
+    pub fn resolve(m: *Machine, p: *Pending, v: Value) void {
+        m.settle(p, if (value_mod.isPureData(v)) .{ .resolved = v } else .failed);
+    }
+
+    /// Host settles a call as a failure (§3 host-error when forced).
+    pub fn resolveFailure(m: *Machine, p: *Pending) void {
+        m.settle(p, .failed);
+    }
+
+    fn settle(m: *Machine, p: *Pending, state: Pending.State) void {
+        std.debug.assert(p.state == .outstanding); // host protocol: settle once
+        p.state = state;
+        for (m.outstanding_calls.items, 0..) |c, i| {
+            if (c == p) {
+                _ = m.outstanding_calls.orderedRemove(i);
+                return;
+            }
         }
-        m.control = .{ .value = v };
+        unreachable; // host protocol: p must come from outstanding()
+    }
+
+    /// Continue after settling one or more calls.
+    pub fn continueRun(m: *Machine) Error!Outcome {
         return m.loop();
     }
 
-    /// Host resolves the outstanding call as a failure; the evaluation aborts
-    /// with host-error (§3). Returns the error for the caller to propagate.
-    pub fn resumeWithError(m: *Machine) Error {
-        std.debug.assert(m.suspended_on != null);
-        m.diagnostic = .{ .context = m.suspended_on.?.name };
-        m.suspended_on = null;
-        return Error.HostError;
-    }
-
-    /// Synchronous-host adapter: services each suspension with the
-    /// capability's own registered handler.
+    /// Synchronous-host adapter: services blocked outcomes by running each
+    /// outstanding call's own registered handler, in dispatch order.
     pub fn runToCompletion(m: *Machine, d: Datum) Error!Value {
         var outcome = try m.evalToplevel(d);
         while (true) {
             switch (outcome) {
                 .value => |v| return v,
-                .suspended => |s| {
-                    const result = s.capability.handler(s.capability.ctx, m.arena, s.args) catch |err| switch (err) {
-                        error.HostError => return m.resumeWithError(),
-                        error.OutOfMemory => {
-                            m.suspended_on = null;
-                            return Error.OutOfMemory;
-                        },
-                    };
-                    outcome = try m.resumeWithValue(result);
+                .blocked => {
+                    std.debug.assert(m.outstanding_calls.items.len > 0);
+                    const p = m.outstanding_calls.items[0];
+                    if (p.capability.handler(p.capability.ctx, m.arena, p.args)) |result| {
+                        m.resolve(p, result);
+                    } else |err| switch (err) {
+                        error.HostError => m.resolveFailure(p),
+                        error.OutOfMemory => return Error.OutOfMemory,
+                    }
+                    outcome = try m.continueRun();
                 },
             }
         }
@@ -147,9 +160,13 @@ pub const Machine = struct {
                     if (m.frames.items.len == 0) return .{ .value = v };
                     m.control = try m.stepFrame(v);
                 },
-                .suspend_request => |s| {
-                    m.suspended_on = s.capability;
-                    return .{ .suspended = s };
+                .awaiting => |p| switch (p.state) {
+                    .resolved => |v| m.control = .{ .value = v },
+                    .failed => {
+                        m.diagnostic = .{ .context = p.capability.name };
+                        return Error.HostError;
+                    },
+                    .outstanding => return .blocked,
                 },
             }
         }
@@ -279,13 +296,18 @@ pub const Machine = struct {
             },
             .capability => |c| {
                 // §4: only pure data crosses the boundary (guest side; the
-                // host side is checked at resume).
+                // host side is checked at resolve).
                 for (args) |a| if (!value_mod.isPureData(a)) {
                     m.diagnostic = .{ .context = c.name };
                     return Error.TypeError;
                 };
-                // Detachable suspension: stop and hand the call to the host.
-                return .{ .suspend_request = .{ .capability = c, .args = args } };
+                // Dispatch: the call becomes a pending settled by the host.
+                // For now every class forces immediately (awaiting right
+                // away); independent classes start continuing in 6.14.
+                const p = try m.arena.create(Pending);
+                p.* = .{ .capability = c, .args = args };
+                try m.outstanding_calls.append(m.arena, p);
+                return .{ .awaiting = p };
             },
             else => return Error.NotAProcedure,
         }
@@ -497,7 +519,7 @@ fn nopHandler(_: *anyopaque, _: std.mem.Allocator, _: []const Value) capability_
     return .unspecified; // manual suspend/resume tests never invoke handlers
 }
 
-test "machine: suspension hands the call to the host and resumes mid-expression" {
+test "machine: blocked hands the call to the host and continues mid-expression" {
     var t = TestMachine.init();
     defer t.deinit();
     _ = try t.run("1");
@@ -513,18 +535,21 @@ test "machine: suspension hands the call to the host and resumes mid-expression"
     };
     try capability_mod.register(m.global, &cap);
 
-    // Suspends in the middle of an application; machine state carries the
+    // Blocks in the middle of an application; machine state carries the
     // surrounding computation.
     const outcome = try m.evalToplevel(try readOne(arena, "(+ 1 (ask 3) 100)"));
-    try std.testing.expect(outcome == .suspended);
-    try std.testing.expectEqualStrings("ask", outcome.suspended.capability.name);
-    try std.testing.expectEqual(@as(i64, 3), outcome.suspended.args[0].integer);
+    try std.testing.expect(outcome == .blocked);
+    const calls = m.outstanding();
+    try std.testing.expectEqual(@as(usize, 1), calls.len);
+    try std.testing.expectEqualStrings("ask", calls[0].capability.name);
+    try std.testing.expectEqual(@as(i64, 3), calls[0].args[0].integer);
 
-    const done = try m.resumeWithValue(.{ .integer = 6 });
+    m.resolve(calls[0], .{ .integer = 6 });
+    const done = try m.continueRun();
     try std.testing.expectEqual(@as(i64, 107), done.value.integer);
 }
 
-test "machine: suspension survives define and nested control" {
+test "machine: blocked state survives define and nested control" {
     var t = TestMachine.init();
     defer t.deinit();
     _ = try t.run("1");
@@ -536,12 +561,13 @@ test "machine: suspension survives define and nested control" {
     try capability_mod.register(m.global, &cap);
 
     const outcome = try m.evalToplevel(try readOne(arena, "(define x (if #t (begin 1 (ask 'q)) 9))"));
-    try std.testing.expect(outcome == .suspended);
-    _ = try m.resumeWithValue(.{ .integer = 55 });
+    try std.testing.expect(outcome == .blocked);
+    m.resolve(m.outstanding()[0], .{ .integer = 55 });
+    _ = try m.continueRun();
     try std.testing.expectEqual(@as(i64, 55), (try t.run("x")).integer);
 }
 
-test "machine: resume with error and with impure value" {
+test "machine: failure and impure resolution surface as host-error" {
     var t = TestMachine.init();
     defer t.deinit();
     _ = try t.run("1");
@@ -553,15 +579,16 @@ test "machine: resume with error and with impure value" {
     try capability_mod.register(m.global, &cap);
 
     var outcome = try m.evalToplevel(try readOne(arena, "(ask 1)"));
-    try std.testing.expect(outcome == .suspended);
-    try std.testing.expectEqual(m.resumeWithError(), error.HostError);
+    try std.testing.expect(outcome == .blocked);
+    m.resolveFailure(m.outstanding()[0]);
+    try std.testing.expectError(error.HostError, m.continueRun());
     try std.testing.expectEqualStrings("ask", m.diagnostic.?.context);
 
-    // session usable again; resuming with a procedure is a host fault
+    // session usable again; resolving with a procedure is a host fault
     outcome = try m.evalToplevel(try readOne(arena, "(ask 2)"));
-    try std.testing.expect(outcome == .suspended);
-    const proc = m.global.lookup("+").?;
-    try std.testing.expectError(error.HostError, m.resumeWithValue(proc));
+    try std.testing.expect(outcome == .blocked);
+    m.resolve(m.outstanding()[0], m.global.lookup("+").?);
+    try std.testing.expectError(error.HostError, m.continueRun());
 
     // and still usable after that
     try std.testing.expectEqual(@as(i64, 2), (try t.run("(+ 1 1)")).integer);
