@@ -71,6 +71,10 @@
 
 (define (abs n) (if (< n 0) (- n) n))
 
+(define (zero? n) (= n 0))
+(define (positive? n) (> n 0))
+(define (negative? n) (< n 0))
+
 (define (%extremum pick a rest)
   (let loop ((m a) (xs rest))
     (if (null? xs)

@@ -1110,6 +1110,15 @@ test "differential: machine and oracle agree on a form corpus" {
         "(< 1 1.5 2)",
         "(max 3 9 2)",
         "(+ 1.5 'a)",
+        // numeric predicates (8B.5)
+        "(list (number? 1) (number? 1.5) (number? 'a))",
+        "(integer? 1.0)",
+        "(integer? 1.5)",
+        "(list (exact? 1) (exact? 1.0) (inexact? 1.0))",
+        "(exact->inexact 3)",
+        "(inexact->exact 3.0)",
+        "(inexact->exact 3.5)",
+        "(list (zero? 0) (positive? 2.5) (negative? -1))",
         // cond/and/or (7.3): short-circuit means untaken positions may be unbound
         "(cond (#f 1) ((eq? 1 1) 'hit) (else 'miss))",
         "(cond (#f 1))",

@@ -51,7 +51,81 @@ const table = [_]Value.Primitive{
     .{ .name = ">=", .func = ge },
     .{ .name = "eqv?", .func = eqv },
     .{ .name = "equal?", .func = equalPred },
+    .{ .name = "number?", .func = isNumber },
+    .{ .name = "complex?", .func = isNumber }, // restricted tower: number = real
+    .{ .name = "real?", .func = isNumber },
+    .{ .name = "rational?", .func = isRational },
+    .{ .name = "integer?", .func = isInteger },
+    .{ .name = "exact?", .func = isExact },
+    .{ .name = "inexact?", .func = isInexact },
+    .{ .name = "exact->inexact", .func = exactToInexact },
+    .{ .name = "inexact->exact", .func = inexactToExact },
 };
+
+fn isNumber(_: std.mem.Allocator, args: []const Value) PrimitiveError!Value {
+    try exactly(args, 1);
+    return .{ .boolean = args[0] == .integer or args[0] == .real };
+}
+
+fn isRational(_: std.mem.Allocator, args: []const Value) PrimitiveError!Value {
+    try exactly(args, 1);
+    return .{ .boolean = switch (args[0]) {
+        .integer => true,
+        .real => |x| std.math.isFinite(x),
+        else => false,
+    } };
+}
+
+/// R5RS: an integral real is an integer — (integer? 1.0) is #t.
+fn isInteger(_: std.mem.Allocator, args: []const Value) PrimitiveError!Value {
+    try exactly(args, 1);
+    return .{ .boolean = switch (args[0]) {
+        .integer => true,
+        .real => |x| std.math.isFinite(x) and @floor(x) == x,
+        else => false,
+    } };
+}
+
+fn isExact(_: std.mem.Allocator, args: []const Value) PrimitiveError!Value {
+    try exactly(args, 1);
+    return switch (args[0]) {
+        .integer => .{ .boolean = true },
+        .real => .{ .boolean = false },
+        else => error.TypeError,
+    };
+}
+
+fn isInexact(_: std.mem.Allocator, args: []const Value) PrimitiveError!Value {
+    try exactly(args, 1);
+    return switch (args[0]) {
+        .integer => .{ .boolean = false },
+        .real => .{ .boolean = true },
+        else => error.TypeError,
+    };
+}
+
+fn exactToInexact(_: std.mem.Allocator, args: []const Value) PrimitiveError!Value {
+    try exactly(args, 1);
+    return switch (args[0]) {
+        .integer => |n| .{ .real = @floatFromInt(n) },
+        .real => args[0],
+        else => error.TypeError,
+    };
+}
+
+fn inexactToExact(_: std.mem.Allocator, args: []const Value) PrimitiveError!Value {
+    try exactly(args, 1);
+    return switch (args[0]) {
+        .integer => args[0],
+        // no rationals in the restricted tower: only integral reals convert
+        .real => |x| if (std.math.isFinite(x) and @floor(x) == x and
+            @abs(x) <= 9007199254740992.0)
+            .{ .integer = @intFromFloat(x) }
+        else
+            error.TypeError,
+        else => error.TypeError,
+    };
+}
 
 /// Numeric contagion (§1): integer with integer stays exact; anything
 /// touching a real goes through f64.
