@@ -9,6 +9,7 @@
 const std = @import("std");
 const datum_mod = @import("datum.zig");
 const env_mod = @import("env.zig");
+const capability_mod = @import("capability.zig");
 
 /// Errors a primitive may raise; a subset of the evaluator's error set
 /// (defined here so value.zig doesn't depend on eval.zig).
@@ -30,6 +31,9 @@ pub const Value = union(enum) {
     unspecified,
     closure: *Closure,
     primitive: *const Primitive,
+    /// Host capability (§4): kept distinct from primitive so the external
+    /// boundary stays semantically visible to the runtime and scheduler.
+    capability: *const capability_mod.Capability,
 
     pub const Pair = struct { car: Value, cdr: Value };
 

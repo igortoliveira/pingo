@@ -13,6 +13,7 @@ pub const eval = @import("eval.zig");
 pub const env = @import("env.zig");
 pub const primitives = @import("primitives.zig");
 pub const limits = @import("limits.zig");
+pub const capability = @import("capability.zig");
 
 test {
     std.testing.refAllDecls(@This());
