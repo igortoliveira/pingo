@@ -76,8 +76,14 @@ pub const Evaluator = struct {
         return e.eval(d, e.global);
     }
 
-    pub fn eval(e: *Evaluator, d: Datum, scope: *Env) Error!Value {
-        switch (d) {
+    /// Iterative evaluator: tail positions (last body expression, chosen `if`
+    /// branch, last `begin` expression) loop instead of recursing, so tail
+    /// calls consume no Zig stack (semantics §5: proper tail calls are
+    /// guaranteed). Non-tail subexpressions still recurse.
+    pub fn eval(e: *Evaluator, d0: Datum, scope0: *Env) Error!Value {
+        var d = d0;
+        var scope = scope0;
+        while (true) switch (d) {
             // Self-evaluating literals (semantics §2).
             .integer => |n| return .{ .integer = n },
             .boolean => |b| return .{ .boolean = b },
@@ -110,8 +116,14 @@ pub const Evaluator = struct {
                         else => return Error.BadSyntax,
                     }
                     const cond = try e.eval(c.pair.car, scope);
-                    if (isTruthy(cond)) return e.eval(t.car, scope);
-                    if (alt) |a| return e.eval(a, scope);
+                    if (isTruthy(cond)) {
+                        d = t.car; // tail position
+                        continue;
+                    }
+                    if (alt) |a| {
+                        d = a; // tail position
+                        continue;
+                    }
                     return .unspecified;
                 }
                 if (isForm(p, "lambda")) return e.makeClosure(p.cdr, scope);
@@ -119,11 +131,14 @@ pub const Evaluator = struct {
                     // (begin e1 ... en), n >= 1: sequential by definition (§2).
                     var rest = p.cdr;
                     if (rest != .pair) return Error.BadSyntax;
-                    var result: Value = .unspecified;
-                    while (rest == .pair) : (rest = rest.pair.cdr)
-                        result = try e.eval(rest.pair.car, scope);
-                    if (rest != .empty_list) return Error.BadSyntax;
-                    return result;
+                    // Validate the shape first so (begin 1 . 2) can't run e1.
+                    var check = rest;
+                    while (check == .pair) : (check = check.pair.cdr) {}
+                    if (check != .empty_list) return Error.BadSyntax;
+                    while (rest.pair.cdr == .pair) : (rest = rest.pair.cdr)
+                        _ = try e.eval(rest.pair.car, scope);
+                    d = rest.pair.car; // tail position
+                    continue;
                 }
 
                 // Application. The reference evaluator picks left-to-right,
@@ -135,9 +150,23 @@ pub const Evaluator = struct {
                 while (rest == .pair) : (rest = rest.pair.cdr)
                     try args.append(e.arena, try e.eval(rest.pair.car, scope));
                 if (rest != .empty_list) return Error.BadSyntax;
-                return e.apply(op, args.items);
+
+                switch (op) {
+                    .closure => |c| {
+                        // Inline the closure call so its last body expression
+                        // is a tail position of this loop.
+                        if (args.items.len != c.params.len) return Error.ArityMismatch;
+                        const child = try Env.init(e.arena, c.env);
+                        for (c.params, args.items) |name, v| try child.define(name, v);
+                        for (c.body[0 .. c.body.len - 1]) |bd| _ = try e.eval(bd, child);
+                        d = c.body[c.body.len - 1];
+                        scope = child;
+                        continue;
+                    },
+                    else => return e.apply(op, args.items),
+                }
             },
-        }
+        };
     }
 
     fn makeClosure(e: *Evaluator, form: Datum, scope: *Env) Error!Value {
@@ -432,6 +461,35 @@ test "errors carry §3 kind and context, never panic" {
 
     // the session stays usable after any error (§3)
     try std.testing.expectEqual(@as(i64, 2), (try s.run("(+ 1 1)")).integer);
+}
+
+test "tail calls do not grow the stack" {
+    var s = TestSession.init();
+    defer s.deinit();
+    _ = try s.run("(define loop (lambda (n) (if (eq? n 0) 'done (loop (- n 1)))))");
+    try std.testing.expectEqualStrings("done", (try s.run("(loop 1000000)")).symbol);
+}
+
+test "mutual tail recursion" {
+    var s = TestSession.init();
+    defer s.deinit();
+    _ = try s.run("(define even? (lambda (n) (if (eq? n 0) #t (odd? (- n 1)))))");
+    _ = try s.run("(define odd? (lambda (n) (if (eq? n 0) #f (even? (- n 1)))))");
+    try std.testing.expectEqual(false, (try s.run("(even? 100001)")).boolean);
+}
+
+test "tail position through begin" {
+    var s = TestSession.init();
+    defer s.deinit();
+    _ = try s.run("(define f (lambda (n) (if (eq? n 0) 'ok (begin 1 (f (- n 1))))))");
+    try std.testing.expectEqualStrings("ok", (try s.run("(f 200000)")).symbol);
+}
+
+test "non-tail recursion still works" {
+    var s = TestSession.init();
+    defer s.deinit();
+    _ = try s.run("(define fact (lambda (n) (if (eq? n 0) 1 (* n (fact (- n 1))))))");
+    try std.testing.expectEqual(@as(i64, 3628800), (try s.run("(fact 10)")).integer);
 }
 
 test "define binds, returns unspecified, and persists" {
