@@ -33,6 +33,8 @@ const Frame = union(enum) {
     /// A begin/body sequence: discard the arrived value, evaluate `rest`
     /// (invariant: a proper, non-empty list — validated before pushing).
     seq: struct { rest: Datum, env: *Env },
+    /// Toplevel (define name _): bind the arrived value globally (§2).
+    define: struct { name: []const u8 },
 };
 
 pub const Machine = struct {
@@ -51,11 +53,20 @@ pub const Machine = struct {
 
     pub fn evalToplevel(m: *Machine, d: Datum) Error!Value {
         m.diagnostic = null;
-        return m.run(d, m.global);
+        if (d == .pair and isForm(d.pair, "define")) {
+            const args = d.pair.cdr;
+            if (args != .pair or args.pair.car != .symbol) return Error.BadSyntax;
+            if (args.pair.cdr != .pair or args.pair.cdr.pair.cdr != .empty_list)
+                return Error.BadSyntax;
+            return m.run(args.pair.cdr.pair.car, m.global, args.pair.car.symbol);
+        }
+        return m.run(d, m.global, null);
     }
 
-    fn run(m: *Machine, d0: Datum, env0: *Env) Error!Value {
+    fn run(m: *Machine, d0: Datum, env0: *Env, define_name: ?[]const u8) Error!Value {
         m.frames.clearRetainingCapacity();
+        if (define_name) |name|
+            try m.frames.append(m.arena, .{ .define = .{ .name = name } });
         var control: Control = .{ .expr = .{ .d = d0, .env = env0 } };
         while (true) {
             try m.chargeFuel();
@@ -111,7 +122,9 @@ pub const Machine = struct {
                     if (check != .empty_list) return Error.BadSyntax;
                     return m.enterSequence(p.cdr, x.env);
                 }
-                return Error.Unsupported; // lambda and applications land in 6.4–6.5
+                if (isForm(p, "lambda"))
+                    return .{ .value = try value_mod.makeClosure(m.arena, p.cdr, x.env) };
+                return Error.Unsupported; // applications land in 6.5
             },
         }
     }
@@ -134,6 +147,10 @@ pub const Machine = struct {
                 return .{ .value = .unspecified };
             },
             .seq => |s| return m.enterSequence(s.rest, s.env),
+            .define => |def| {
+                try m.global.define(def.name, v);
+                return .{ .value = .unspecified };
+            },
         }
     }
 
@@ -220,6 +237,32 @@ test "machine: begin" {
     try std.testing.expectError(error.UnboundVariable, t.run("(begin boom 2)"));
     // nested control through frames
     try std.testing.expectEqual(@as(i64, 5), (try t.run("(begin 1 (if #f 4 (begin 2 5)))")).integer);
+}
+
+test "machine: define and lambda" {
+    var t = TestMachine.init();
+    defer t.deinit();
+    try std.testing.expectEqual(Value.unspecified, try t.run("(define x 42)"));
+    try std.testing.expectEqual(@as(i64, 42), (try t.run("x")).integer);
+    _ = try t.run("(define x 7)"); // redefinition replaces
+    try std.testing.expectEqual(@as(i64, 7), (try t.run("x")).integer);
+
+    try std.testing.expect((try t.run("(lambda (a b) a)")) == .closure);
+    _ = try t.run("(define id (lambda (v) v))");
+    try std.testing.expect(t.machine.?.global.lookup("id").? == .closure);
+}
+
+test "machine: define and lambda shape errors" {
+    var t = TestMachine.init();
+    defer t.deinit();
+    try std.testing.expectError(error.BadSyntax, t.run("(define y (define z 1))"));
+    try std.testing.expectError(error.BadSyntax, t.run("(define 3 1)"));
+    try std.testing.expectError(error.BadSyntax, t.run("(define x 1 2)"));
+    try std.testing.expectError(error.BadSyntax, t.run("(lambda (x))"));
+    try std.testing.expectError(error.BadSyntax, t.run("(lambda (x x) x)"));
+    // a define whose expression errors binds nothing
+    try std.testing.expectError(error.UnboundVariable, t.run("(define w boom)"));
+    try std.testing.expectError(error.UnboundVariable, t.run("w"));
 }
 
 test "machine: syntax errors and fuel" {

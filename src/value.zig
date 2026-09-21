@@ -56,6 +56,42 @@ pub fn isTruthy(v: Value) bool {
     return !(v == .boolean and !v.boolean);
 }
 
+/// Parses `(lambda (p ...) body1 ... bodyn)` given `form` = the datum after
+/// the `lambda` symbol. Shared by the reference evaluator and the machine so
+/// the shape rules can't drift apart. n >= 1; params are distinct symbols.
+pub fn makeClosure(
+    arena: std.mem.Allocator,
+    form: datum_mod.Datum,
+    scope: *env_mod.Env,
+) error{ BadSyntax, OutOfMemory }!Value {
+    if (form != .pair) return error.BadSyntax;
+    var params: std.ArrayList([]const u8) = .empty;
+    defer params.deinit(arena);
+    var rest = form.pair.car;
+    while (rest == .pair) : (rest = rest.pair.cdr) {
+        if (rest.pair.car != .symbol) return error.BadSyntax;
+        const name = rest.pair.car.symbol;
+        for (params.items) |seen|
+            if (std.mem.eql(u8, seen, name)) return error.BadSyntax;
+        try params.append(arena, name);
+    }
+    if (rest != .empty_list) return error.BadSyntax;
+
+    var body: std.ArrayList(datum_mod.Datum) = .empty;
+    defer body.deinit(arena);
+    var b = form.pair.cdr;
+    while (b == .pair) : (b = b.pair.cdr) try body.append(arena, b.pair.car);
+    if (b != .empty_list or body.items.len == 0) return error.BadSyntax;
+
+    const c = try arena.create(Value.Closure);
+    c.* = .{
+        .params = try arena.dupe([]const u8, params.items),
+        .body = try arena.dupe(datum_mod.Datum, body.items),
+        .env = scope,
+    };
+    return .{ .closure = c };
+}
+
 /// Deep-converts a reader Datum into a Value, copying bytes so the Value's
 /// lifetime is independent of the Datum's arena.
 pub fn fromDatum(arena: std.mem.Allocator, d: datum_mod.Datum) std.mem.Allocator.Error!Value {

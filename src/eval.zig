@@ -211,33 +211,7 @@ pub const Evaluator = struct {
     }
 
     fn makeClosure(e: *Evaluator, form: Datum, scope: *Env) Error!Value {
-        // (lambda (p ...) body1 ... bodyn), n >= 1, params distinct symbols.
-        if (form != .pair) return Error.BadSyntax;
-        var params: std.ArrayList([]const u8) = .empty;
-        defer params.deinit(e.arena);
-        var rest = form.pair.car;
-        while (rest == .pair) : (rest = rest.pair.cdr) {
-            if (rest.pair.car != .symbol) return Error.BadSyntax;
-            const name = rest.pair.car.symbol;
-            for (params.items) |seen|
-                if (std.mem.eql(u8, seen, name)) return Error.BadSyntax;
-            try params.append(e.arena, name);
-        }
-        if (rest != .empty_list) return Error.BadSyntax;
-
-        var body: std.ArrayList(Datum) = .empty;
-        defer body.deinit(e.arena);
-        var b = form.pair.cdr;
-        while (b == .pair) : (b = b.pair.cdr) try body.append(e.arena, b.pair.car);
-        if (b != .empty_list or body.items.len == 0) return Error.BadSyntax;
-
-        const c = try e.arena.create(Value.Closure);
-        c.* = .{
-            .params = try e.arena.dupe([]const u8, params.items),
-            .body = try e.arena.dupe(Datum, body.items),
-            .env = scope,
-        };
-        return .{ .closure = c };
+        return value_mod.makeClosure(e.arena, form, scope);
     }
 
     pub fn apply(e: *Evaluator, op: Value, args: []const Value) Error!Value {
