@@ -43,6 +43,10 @@ pub const Value = union(enum) {
     pub const Primitive = struct {
         name: []const u8,
         func: *const fn (arena: std.mem.Allocator, args: []const Value) PrimitiveError!Value,
+        /// §4 strictness: primitives compute on real values, so their
+        /// arguments force pendings — except `cons`, which only stores and is
+        /// how pendings flow into lists.
+        strict_args: bool = true,
     };
 
     /// One outstanding/settled external call. Resolves in place: every Value

@@ -18,7 +18,7 @@ const table = [_]Value.Primitive{
     .{ .name = "-", .func = sub },
     .{ .name = "*", .func = mul },
     .{ .name = "/", .func = div },
-    .{ .name = "cons", .func = cons },
+    .{ .name = "cons", .func = cons, .strict_args = false },
     .{ .name = "car", .func = car },
     .{ .name = "cdr", .func = cdr },
     .{ .name = "null?", .func = isNull },

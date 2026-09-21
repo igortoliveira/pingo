@@ -52,6 +52,9 @@ const Frame = union(enum) {
     app: struct { remaining: Datum, env: *Env, collected: std.ArrayList(Value) },
     /// Rest of a closure body (invariant: non-empty slice).
     body: struct { rest: []const Datum, env: *Env },
+    /// Re-runs applyCollected after an awaited pending settles (the arriving
+    /// value is ignored; forced pendings are re-read from `collected`).
+    apply: struct { collected: std.ArrayList(Value) },
 };
 
 pub const Machine = struct {
@@ -65,6 +68,9 @@ pub const Machine = struct {
     /// Calls dispatched and not yet settled by the host, in dispatch order
     /// (the §6 observation sequence).
     outstanding_calls: std.ArrayList(*Pending) = .empty,
+    /// Every call dispatched during the current feed, for the toplevel
+    /// stop-on-error scan (§4 toplevel sync).
+    feed_calls: std.ArrayList(*Pending) = .empty,
 
     pub fn init(arena: std.mem.Allocator, limits: Limits) std.mem.Allocator.Error!Machine {
         const global = try Env.init(arena, null);
@@ -77,6 +83,7 @@ pub const Machine = struct {
         // were dispatched — that observation stands — but nothing waits on
         // them anymore (§3 abort semantics).
         m.outstanding_calls.clearRetainingCapacity();
+        m.feed_calls.clearRetainingCapacity();
         m.diagnostic = null;
         if (d == .pair and isForm(d.pair, "define")) {
             const args = d.pair.cdr;
@@ -157,7 +164,23 @@ pub const Machine = struct {
             switch (m.control) {
                 .expr => |x| m.control = try m.stepExpr(x),
                 .value => |v| {
-                    if (m.frames.items.len == 0) return .{ .value = v };
+                    if (m.frames.items.len == 0) {
+                        // §4 toplevel sync: the feed only completes when
+                        // every dispatched call has settled...
+                        if (m.outstanding_calls.items.len > 0) return .blocked;
+                        // ...and none failed, even if never forced
+                        // (stop-on-error, §6).
+                        for (m.feed_calls.items) |p| if (p.state == .failed) {
+                            m.diagnostic = .{ .context = p.capability.name };
+                            return Error.HostError;
+                        };
+                        // The result itself is a strictness point: substitute
+                        // settled pendings so none escape to the host.
+                        switch (try m.forceDeep(v)) {
+                            .value => |final| return .{ .value = final },
+                            .blocked => unreachable, // outstanding is empty
+                        }
+                    }
                     m.control = try m.stepFrame(v);
                 },
                 .awaiting => |p| switch (p.state) {
@@ -245,7 +268,15 @@ pub const Machine = struct {
         const frame = m.frames.pop().?;
         switch (frame) {
             .branch => |b| {
-                if (value_mod.isTruthy(v)) return .{ .expr = .{ .d = b.then, .env = b.env } };
+                // The `if` condition is a strictness point (§4).
+                const cond = switch (try m.forced1(v)) {
+                    .value => |real| real,
+                    .blocked => |p| {
+                        try m.pushFrame(.{ .branch = b });
+                        return .{ .awaiting = p };
+                    },
+                };
+                if (value_mod.isTruthy(cond)) return .{ .expr = .{ .d = b.then, .env = b.env } };
                 if (b.alt) |a| return .{ .expr = .{ .d = a, .env = b.env } };
                 return .{ .value = .unspecified };
             },
@@ -263,8 +294,9 @@ pub const Machine = struct {
                     try m.pushFrame(.{ .app = app });
                     return .{ .expr = .{ .d = next, .env = app.env } };
                 }
-                return m.applyCollected(app.collected.items);
+                return m.applyCollected(app.collected);
             },
+            .apply => |a| return m.applyCollected(a.collected), // v is the settled pending's value; re-read from collected
             .body => |b| {
                 if (b.rest.len == 1) // tail position: push nothing
                     return .{ .expr = .{ .d = b.rest[0], .env = b.env } };
@@ -274,10 +306,17 @@ pub const Machine = struct {
         }
     }
 
-    fn applyCollected(m: *Machine, collected: []const Value) Error!Control {
-        const op = collected[0];
-        const args = collected[1..];
+    fn applyCollected(m: *Machine, collected: std.ArrayList(Value)) Error!Control {
+        const items = collected.items;
+        // The operator position is a strictness point (§4).
+        items[0] = switch (try m.forced1(items[0])) {
+            .value => |real| real,
+            .blocked => |p| return m.awaitAndReapply(collected, p),
+        };
+        const op = items[0];
+        const args = items[1..];
         switch (op) {
+            // Parameter binding is not strict: closures accept pendings.
             .closure => |c| {
                 if (args.len != c.params.len) return Error.ArityMismatch;
                 const child = try Env.init(m.arena, c.env);
@@ -287,29 +326,90 @@ pub const Machine = struct {
                 try m.pushFrame(.{ .body = .{ .rest = c.body[1..], .env = child } });
                 return .{ .expr = .{ .d = c.body[0], .env = child } };
             },
-            .primitive => |p| {
-                const result = p.func(m.arena, args) catch |err| {
-                    m.diagnostic = .{ .context = p.name };
+            .primitive => |prim| {
+                if (prim.strict_args) for (args, 0..) |a, i| {
+                    args[i] = switch (try m.forced1(a)) {
+                        .value => |real| real,
+                        .blocked => |p| return m.awaitAndReapply(collected, p),
+                    };
+                };
+                const result = prim.func(m.arena, args) catch |err| {
+                    m.diagnostic = .{ .context = prim.name };
                     return err;
                 };
                 return .{ .value = result };
             },
             .capability => |c| {
-                // §4: only pure data crosses the boundary (guest side; the
-                // host side is checked at resolve).
-                for (args) |a| if (!value_mod.isPureData(a)) {
-                    m.diagnostic = .{ .context = c.name };
-                    return Error.TypeError;
-                };
+                // Boundary arguments force deeply (§4): fully-resolved pure
+                // data or nothing.
+                for (args, 0..) |a, i| {
+                    args[i] = switch (try m.forceDeep(a)) {
+                        .value => |real| real,
+                        .blocked => |p| return m.awaitAndReapply(collected, p),
+                    };
+                    if (!value_mod.isPureData(args[i])) {
+                        m.diagnostic = .{ .context = c.name };
+                        return Error.TypeError;
+                    }
+                }
                 // Dispatch: the call becomes a pending settled by the host.
-                // For now every class forces immediately (awaiting right
-                // away); independent classes start continuing in 6.14.
                 const p = try m.arena.create(Pending);
                 p.* = .{ .capability = c, .args = args };
                 try m.outstanding_calls.append(m.arena, p);
-                return .{ .awaiting = p };
+                try m.feed_calls.append(m.arena, p);
+                return switch (c.class) {
+                    // No effect at all: continuing past it is trivially safe.
+                    // external-independent joins in 6.14.
+                    .pure => .{ .value = .{ .pending = p } },
+                    else => .{ .awaiting = p },
+                };
             },
             else => return Error.NotAProcedure,
+        }
+    }
+
+    fn awaitAndReapply(m: *Machine, collected: std.ArrayList(Value), p: *Pending) Error!Control {
+        try m.pushFrame(.{ .apply = .{ .collected = collected } });
+        return .{ .awaiting = p };
+    }
+
+    const Forced = union(enum) { value: Value, blocked: *Pending };
+
+    /// Shallow force: settles one pending level. Failed calls surface here
+    /// as host-error (§3).
+    fn forced1(m: *Machine, v: Value) Error!Forced {
+        if (v != .pending) return .{ .value = v };
+        return switch (v.pending.state) {
+            .resolved => |inner| .{ .value = inner }, // resolutions are pure data; no nesting
+            .outstanding => .{ .blocked = v.pending },
+            .failed => {
+                m.diagnostic = .{ .context = v.pending.capability.name };
+                return Error.HostError;
+            },
+        };
+    }
+
+    /// Deep force: substitutes settled pendings throughout a data tree,
+    /// rebuilding pairs only where something changed.
+    fn forceDeep(m: *Machine, v: Value) Error!Forced {
+        switch (v) {
+            .pending => return m.forced1(v),
+            .pair => |pr| {
+                const car = switch (try m.forceDeep(pr.car)) {
+                    .value => |real| real,
+                    .blocked => |p| return .{ .blocked = p },
+                };
+                const cdr = switch (try m.forceDeep(pr.cdr)) {
+                    .value => |real| real,
+                    .blocked => |p| return .{ .blocked = p },
+                };
+                if (primitives.eqValues(car, pr.car) and primitives.eqValues(cdr, pr.cdr))
+                    return .{ .value = v };
+                const rebuilt = try m.arena.create(Value.Pair);
+                rebuilt.* = .{ .car = car, .cdr = cdr };
+                return .{ .value = .{ .pair = rebuilt } };
+            },
+            else => return .{ .value = v },
         }
     }
 
@@ -517,6 +617,82 @@ fn readOne(arena: std.mem.Allocator, src: []const u8) !Datum {
 
 fn nopHandler(_: *anyopaque, _: std.mem.Allocator, _: []const Value) capability_mod.HostError!Value {
     return .unspecified; // manual suspend/resume tests never invoke handlers
+}
+
+test "machine: pure calls continue; strictness points block" {
+    var t = TestMachine.init();
+    defer t.deinit();
+    _ = try t.run("1");
+    const arena = t.arena_state.allocator();
+    const m = &t.machine.?;
+
+    var dummy: u8 = 0;
+    const cap = capability_mod.Capability{ .name = "pask", .class = .pure, .ctx = &dummy, .handler = nopHandler };
+    try capability_mod.register(m.global, &cap);
+
+    // cons is non-strict: the pending flows into the pair and evaluation
+    // reaches the toplevel sync with the call still outstanding.
+    var outcome = try m.evalToplevel(try readOne(arena, "(cons (pask 1) 2)"));
+    try std.testing.expect(outcome == .blocked);
+    try std.testing.expectEqual(@as(usize, 1), m.outstanding().len);
+    m.resolve(m.outstanding()[0], .{ .integer = 10 });
+    var done = try m.continueRun();
+    // toplevel deep force substituted the settled pending inside the pair
+    try std.testing.expectEqual(@as(i64, 10), done.value.pair.car.integer);
+
+    // a primitive argument is strict: blocks before the primitive runs
+    outcome = try m.evalToplevel(try readOne(arena, "(+ (pask 2) 5)"));
+    try std.testing.expect(outcome == .blocked);
+    m.resolve(m.outstanding()[0], .{ .integer = 20 });
+    done = try m.continueRun();
+    try std.testing.expectEqual(@as(i64, 25), done.value.integer);
+
+    // the if condition is strict
+    outcome = try m.evalToplevel(try readOne(arena, "(if (pask 3) 'yes 'no)"));
+    try std.testing.expect(outcome == .blocked);
+    m.resolve(m.outstanding()[0], .{ .boolean = false });
+    done = try m.continueRun();
+    try std.testing.expectEqualStrings("no", done.value.symbol);
+}
+
+test "machine: pendings pass through closures and define unforced" {
+    var t = TestMachine.init();
+    defer t.deinit();
+    _ = try t.run("(define hold (lambda (x) (lambda () x)))");
+    const arena = t.arena_state.allocator();
+    const m = &t.machine.?;
+
+    var dummy: u8 = 0;
+    const cap = capability_mod.Capability{ .name = "pask", .class = .pure, .ctx = &dummy, .handler = nopHandler };
+    try capability_mod.register(m.global, &cap);
+
+    // The pending is bound to a parameter, captured, returned, and only the
+    // toplevel sync waits for it — never a strict force.
+    const outcome = try m.evalToplevel(try readOne(arena, "((hold (pask 1)))"));
+    try std.testing.expect(outcome == .blocked);
+    m.resolve(m.outstanding()[0], .{ .integer = 77 });
+    const done = try m.continueRun();
+    try std.testing.expectEqual(@as(i64, 77), done.value.integer);
+}
+
+test "machine: a failed call fails the feed even when never forced" {
+    var t = TestMachine.init();
+    defer t.deinit();
+    _ = try t.run("1");
+    const arena = t.arena_state.allocator();
+    const m = &t.machine.?;
+
+    var dummy: u8 = 0;
+    const cap = capability_mod.Capability{ .name = "pask", .class = .pure, .ctx = &dummy, .handler = nopHandler };
+    try capability_mod.register(m.global, &cap);
+
+    // (begin (pask 1) 2): the result is discarded, but §6 stop-on-error says
+    // a sequential run would have aborted — the feed must fail.
+    const outcome = try m.evalToplevel(try readOne(arena, "(begin (pask 1) 2)"));
+    try std.testing.expect(outcome == .blocked);
+    m.resolveFailure(m.outstanding()[0]);
+    try std.testing.expectError(error.HostError, m.continueRun());
+    try std.testing.expectEqualStrings("pask", m.diagnostic.?.context);
 }
 
 test "machine: blocked hands the call to the host and continues mid-expression" {
