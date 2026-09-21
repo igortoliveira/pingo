@@ -6,6 +6,7 @@ const max_read_depth = 64;
 
 // The REPL is the host here (§5): each line gets a fresh fuel budget.
 const repl_limits: pingo.eval.Limits = .{ .fuel = 10_000_000, .call_depth = 1_000 };
+const repl_heap_bytes = 256 * 1024 * 1024; // per session (the v0 arena never frees)
 
 pub fn main(init: std.process.Init) !void {
     var stdin_buffer: [max_line_bytes]u8 = undefined;
@@ -18,7 +19,10 @@ pub fn main(init: std.process.Init) !void {
 
     var session_arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer session_arena_state.deinit();
-    const session_arena = session_arena_state.allocator();
+    // Heap budget (§5 heap_bytes): everything the guest allocates — values,
+    // environments, datums — goes through this budgeted view of the arena.
+    var session_heap = pingo.limits.LimitedAllocator.init(session_arena_state.allocator(), repl_heap_bytes);
+    const session_arena = session_heap.allocator();
     var evaluator = try pingo.eval.Evaluator.init(session_arena, repl_limits);
 
     while (true) {

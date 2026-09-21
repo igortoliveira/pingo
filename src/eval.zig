@@ -39,9 +39,11 @@ pub const Limits = struct {
     call_depth: usize,
 };
 
-/// Maps a runtime error to its §3 kind symbol. OutOfMemory is the host's
-/// problem, not a guest-visible kind (heap limits arrive in Phase 4 as
-/// `limit-exceeded`).
+/// Maps a runtime error to its §3 kind symbol. OutOfMemory maps to
+/// limit-exceeded: hosts run guests behind a byte-budgeted allocator
+/// (limits.LimitedAllocator), so allocation failure *is* the heap_bytes
+/// limit. A genuine host OOM lands on the same kind, which is acceptable —
+/// the guest can't tell the difference and shouldn't.
 pub fn kindOf(err: Error) []const u8 {
     return switch (err) {
         Error.BadSyntax => "bad-syntax",
@@ -53,7 +55,7 @@ pub fn kindOf(err: Error) []const u8 {
         Error.IntegerOverflow => "integer-overflow",
         Error.LimitExceeded => "limit-exceeded",
         Error.Unsupported => "bad-syntax", // unimplemented forms read as syntax for now
-        Error.OutOfMemory => "out-of-memory",
+        Error.OutOfMemory => "limit-exceeded",
     };
 }
 
@@ -547,6 +549,25 @@ test "tail calls do not consume depth" {
     s.evaluator.?.limits.call_depth = 16; // tiny; 100k tail iterations must still fit
     try std.testing.expectEqualStrings("done", (try s.run("(loop 100000)")).symbol);
 }
+
+test "heap budget stops a heap bomb as limit-exceeded" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    var heap = limits_mod.LimitedAllocator.init(arena_state.allocator(), 64 * 1024);
+    const arena = heap.allocator();
+
+    var evaluator = try Evaluator.init(arena, TestSession.test_limits);
+    var r = reader_mod.Reader.init(arena,
+        \\(define grow (lambda (n acc) (if (eq? n 0) acc (grow (- n 1) (cons n acc)))))
+        \\(grow 1000000 '())
+    , 32);
+    _ = try evaluator.evalToplevel((try r.read()).?);
+    const err = evaluator.evalToplevel((try r.read()).?);
+    try std.testing.expectError(error.OutOfMemory, err);
+    try std.testing.expectEqualStrings("limit-exceeded", kindOf(error.OutOfMemory));
+}
+
+const limits_mod = @import("limits.zig");
 
 test "tail calls do not grow the stack" {
     var s = TestSession.init();
