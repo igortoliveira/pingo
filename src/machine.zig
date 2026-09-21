@@ -10,6 +10,7 @@ const value_mod = @import("value.zig");
 const env_mod = @import("env.zig");
 const primitives = @import("primitives.zig");
 const eval_mod = @import("eval.zig");
+const expand = @import("expand.zig");
 
 const Datum = datum_mod.Datum;
 const Value = value_mod.Value;
@@ -248,6 +249,8 @@ pub const Machine = struct {
                 }
                 if (isForm(p, "lambda"))
                     return .{ .value = try value_mod.makeClosure(m.arena, p.cdr, x.env) };
+                if (isForm(p, "let"))
+                    return .{ .expr = .{ .d = try expand.expandLet(m.arena, p.cdr), .env = x.env } };
 
                 // Application: validate the shape upfront, then evaluate the
                 // operator with an app frame waiting for it.
@@ -915,6 +918,14 @@ test "differential: machine and oracle agree on a form corpus" {
         "(lambda (x x) x)",
         "(define y (define z 1))",
         "(+ 9223372036854775807 1)",
+        // let (7.2): plain let is not let* — y sees the OUTER x
+        "(let ((x 2) (y 3)) (* x y))",
+        "(define x 1) (let ((x 2) (y x)) y)",
+        "(let ((x 1)) (let ((x 2)) x))",
+        "(let () 7)",
+        "(let (x) 1)",
+        "(let ((x 1)))",
+        "(let ((x 1) (x 2)) x)",
     };
 
     for (corpus) |src| {

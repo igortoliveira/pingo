@@ -13,7 +13,7 @@ const Value = pingo.value.Value;
 
 const suite = @embedFile("vendor/chibi-scheme/r5rs-tests.scm");
 
-const special_forms = [_][]const u8{ "quote", "if", "define", "lambda", "begin" };
+const special_forms = [_][]const u8{ "quote", "if", "define", "lambda", "begin", "let" };
 
 pub fn main(init: std.process.Init) !void {
     var stdout_buffer: [4096]u8 = undefined;
@@ -138,6 +138,23 @@ fn check(
         },
         .pair => |p| {
             if (p.car == .symbol and std.mem.eql(u8, p.car.symbol, "quote")) return true;
+            if (p.car == .symbol and std.mem.eql(u8, p.car.symbol, "let") and p.cdr == .pair) {
+                const before = bound.items.len;
+                defer bound.shrinkRetainingCapacity(before);
+                var bindings = p.cdr.pair.car;
+                while (bindings == .pair) : (bindings = bindings.pair.cdr) {
+                    const binding = bindings.pair.car;
+                    if (binding != .pair or binding.pair.car != .symbol) return false;
+                    // binding expressions are checked in the outer scope
+                    if (binding.pair.cdr == .pair)
+                        if (!try check(arena, binding.pair.cdr.pair.car, evaluator, bound)) return false;
+                    try bound.append(arena, binding.pair.car.symbol);
+                }
+                var body = p.cdr.pair.cdr;
+                while (body == .pair) : (body = body.pair.cdr)
+                    if (!try check(arena, body.pair.car, evaluator, bound)) return false;
+                return true;
+            }
             if (p.car == .symbol and std.mem.eql(u8, p.car.symbol, "lambda") and p.cdr == .pair) {
                 const before = bound.items.len;
                 defer bound.shrinkRetainingCapacity(before);

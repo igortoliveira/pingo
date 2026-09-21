@@ -7,6 +7,7 @@ const datum_mod = @import("datum.zig");
 const value_mod = @import("value.zig");
 const env_mod = @import("env.zig");
 const primitives = @import("primitives.zig");
+const expand = @import("expand.zig");
 
 const Datum = datum_mod.Datum;
 const Value = value_mod.Value;
@@ -167,6 +168,10 @@ pub const Evaluator = struct {
                         return .unspecified;
                     }
                     if (isForm(p, "lambda")) return e.makeClosure(p.cdr, scope);
+                    if (isForm(p, "let")) {
+                        d = try expand.expandLet(e.arena, p.cdr);
+                        continue;
+                    }
                     if (isForm(p, "begin")) {
                         // (begin e1 ... en), n >= 1: sequential by definition (§2).
                         var rest = p.cdr;
