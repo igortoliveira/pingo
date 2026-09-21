@@ -265,9 +265,26 @@ pub const Evaluator = struct {
                 for (c.body) |bd| result = try e.eval(bd, child);
                 return result;
             },
-            .primitive => |p| return p.func(e.arena, args) catch |err| {
-                e.diagnostic = .{ .context = p.name };
-                return err;
+            .primitive => |p| {
+                if (p == &primitives.apply_primitive) {
+                    // (apply f a ... args): spread the final list.
+                    if (args.len < 2) return Error.ArityMismatch;
+                    var spread: std.ArrayList(Value) = .empty;
+                    defer spread.deinit(e.arena);
+                    try spread.appendSlice(e.arena, args[1 .. args.len - 1]);
+                    var node = args[args.len - 1];
+                    while (node == .pair) : (node = node.pair.cdr)
+                        try spread.append(e.arena, node.pair.car);
+                    if (node != .empty_list) {
+                        e.diagnostic = .{ .context = "apply" };
+                        return Error.TypeError;
+                    }
+                    return e.apply(args[0], spread.items);
+                }
+                return p.func(e.arena, args) catch |err| {
+                    e.diagnostic = .{ .context = p.name };
+                    return err;
+                };
             },
             .capability => |c| {
                 // §4: only pure data crosses the boundary, in either direction.

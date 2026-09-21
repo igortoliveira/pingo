@@ -374,6 +374,8 @@ pub const Machine = struct {
                 return .{ .expr = .{ .d = c.body[0], .env = child } };
             },
             .primitive => |prim| {
+                if (prim == &primitives.apply_primitive)
+                    return m.applySpread(collected);
                 if (prim.strict_args) for (args, 0..) |a, i| {
                     args[i] = switch (try m.forced1(a)) {
                         .value => |real| real,
@@ -427,6 +429,38 @@ pub const Machine = struct {
             },
             else => return Error.NotAProcedure,
         }
+    }
+
+    /// (apply f a ... args): rebuild the application as f a ... plus the
+    /// elements of args, and re-enter applyCollected. The spine of the final
+    /// list is forced (it must be traversable); elements pass through as-is.
+    fn applySpread(m: *Machine, collected: std.ArrayList(Value)) Error!Control {
+        const items = collected.items;
+        if (items.len < 3) return Error.ArityMismatch; // apply + proc + list
+        var spread: std.ArrayList(Value) = .empty;
+        try spread.appendSlice(m.arena, items[1 .. items.len - 1]);
+        var node = items[items.len - 1];
+        while (true) {
+            node = switch (try m.forced1(node)) {
+                .value => |real| real,
+                .blocked => |p| {
+                    spread.deinit(m.arena);
+                    return m.awaitAndReapply(collected, p);
+                },
+            };
+            switch (node) {
+                .empty_list => break,
+                .pair => |pr| {
+                    try spread.append(m.arena, pr.car);
+                    node = pr.cdr;
+                },
+                else => {
+                    m.diagnostic = .{ .context = "apply" };
+                    return Error.TypeError; // final argument must be a proper list
+                },
+            }
+        }
+        return m.applyCollected(spread);
     }
 
     fn awaitAndReapply(m: *Machine, collected: std.ArrayList(Value), p: *Pending) Error!Control {
@@ -1005,6 +1039,14 @@ test "differential: machine and oracle agree on a form corpus" {
         "(define (f a . r) (cons a r)) (f 1 2)",
         "(lambda (a . 2) a)",
         "(lambda (a . a) a)",
+        // apply (8F'.5)
+        "(apply + '(1 2 3))",
+        "(apply + 1 2 '(3 4))",
+        "(apply (lambda (a b) (cons a b)) '(1 2))",
+        "(apply (lambda args (length args)) 1 2 '(3 4 5))",
+        "(apply +)",
+        "(apply + 3)",
+        "(apply 1 '(2))",
         // cond/and/or (7.3): short-circuit means untaken positions may be unbound
         "(cond (#f 1) ((eq? 1 1) 'hit) (else 'miss))",
         "(cond (#f 1))",

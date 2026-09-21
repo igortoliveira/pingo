@@ -11,6 +11,21 @@ const PrimitiveError = value_mod.PrimitiveError;
 /// Installs all primitives into `scope` (normally the global environment).
 pub fn install(scope: *env_mod.Env) std.mem.Allocator.Error!void {
     for (&table) |*p| try scope.define(p.name, .{ .primitive = p });
+    try scope.define(apply_primitive.name, .{ .primitive = &apply_primitive });
+}
+
+/// `apply` is engine-level (§2): a primitive cannot invoke procedures, so the
+/// engines intercept this sentinel by identity and spread the argument list
+/// through their ordinary application path. The stub only fires if an engine
+/// forgets to intercept.
+pub const apply_primitive = Value.Primitive{
+    .name = "apply",
+    .func = applyStub,
+    .strict_args = false, // the target procedure decides strictness
+};
+
+fn applyStub(_: std.mem.Allocator, _: []const Value) PrimitiveError!Value {
+    return error.TypeError;
 }
 
 const table = [_]Value.Primitive{
