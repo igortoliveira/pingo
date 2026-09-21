@@ -8,6 +8,7 @@
 
 const std = @import("std");
 const datum_mod = @import("datum.zig");
+const env_mod = @import("env.zig");
 
 pub const Value = union(enum) {
     integer: i64,
@@ -17,10 +18,18 @@ pub const Value = union(enum) {
     pair: *Pair,
     empty_list,
     unspecified,
-    // The closure and primitive variants land with lambda (plan 3.6) and the
-    // first primitives (plan 3.7).
+    closure: *Closure,
+    // The primitive variant lands with the first primitives (plan 3.7).
 
     pub const Pair = struct { car: Value, cdr: Value };
+
+    pub const Closure = struct {
+        params: []const []const u8,
+        /// Non-empty body, evaluated like `begin`. The datums must live in
+        /// the session arena (they outlive the line that read them).
+        body: []const datum_mod.Datum,
+        env: *env_mod.Env,
+    };
 };
 
 /// Deep-converts a reader Datum into a Value, copying bytes so the Value's

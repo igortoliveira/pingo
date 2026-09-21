@@ -14,6 +14,8 @@ const Env = env_mod.Env;
 pub const Error = error{
     BadSyntax,
     UnboundVariable,
+    NotAProcedure,
+    ArityMismatch,
     Unsupported, // placeholder for plan items not landed yet
     OutOfMemory,
 };
@@ -76,8 +78,63 @@ pub const Evaluator = struct {
                     if (alt) |a| return e.eval(a, scope);
                     return .unspecified;
                 }
-                return Error.Unsupported; // other forms and applications come later
+                if (isForm(p, "lambda")) return e.makeClosure(p.cdr, scope);
+
+                // Application. The reference evaluator picks left-to-right,
+                // one of the sequential orders §2 allows.
+                const op = try e.eval(p.car, scope);
+                var args: std.ArrayList(Value) = .empty;
+                defer args.deinit(e.arena);
+                var rest = p.cdr;
+                while (rest == .pair) : (rest = rest.pair.cdr)
+                    try args.append(e.arena, try e.eval(rest.pair.car, scope));
+                if (rest != .empty_list) return Error.BadSyntax;
+                return e.apply(op, args.items);
             },
+        }
+    }
+
+    fn makeClosure(e: *Evaluator, form: Datum, scope: *Env) Error!Value {
+        // (lambda (p ...) body1 ... bodyn), n >= 1, params distinct symbols.
+        if (form != .pair) return Error.BadSyntax;
+        var params: std.ArrayList([]const u8) = .empty;
+        defer params.deinit(e.arena);
+        var rest = form.pair.car;
+        while (rest == .pair) : (rest = rest.pair.cdr) {
+            if (rest.pair.car != .symbol) return Error.BadSyntax;
+            const name = rest.pair.car.symbol;
+            for (params.items) |seen|
+                if (std.mem.eql(u8, seen, name)) return Error.BadSyntax;
+            try params.append(e.arena, name);
+        }
+        if (rest != .empty_list) return Error.BadSyntax;
+
+        var body: std.ArrayList(Datum) = .empty;
+        defer body.deinit(e.arena);
+        var b = form.pair.cdr;
+        while (b == .pair) : (b = b.pair.cdr) try body.append(e.arena, b.pair.car);
+        if (b != .empty_list or body.items.len == 0) return Error.BadSyntax;
+
+        const c = try e.arena.create(Value.Closure);
+        c.* = .{
+            .params = try e.arena.dupe([]const u8, params.items),
+            .body = try e.arena.dupe(Datum, body.items),
+            .env = scope,
+        };
+        return .{ .closure = c };
+    }
+
+    pub fn apply(e: *Evaluator, op: Value, args: []const Value) Error!Value {
+        switch (op) {
+            .closure => |c| {
+                if (args.len != c.params.len) return Error.ArityMismatch;
+                const child = try Env.init(e.arena, c.env);
+                for (c.params, args) |name, v| try child.define(name, v);
+                var result: Value = .unspecified;
+                for (c.body) |bd| result = try e.eval(bd, child);
+                return result;
+            },
+            else => return Error.NotAProcedure,
         }
     }
 };
@@ -180,6 +237,44 @@ test "if arity is checked" {
     try std.testing.expectError(error.BadSyntax, s.run("(if)"));
     try std.testing.expectError(error.BadSyntax, s.run("(if #t)"));
     try std.testing.expectError(error.BadSyntax, s.run("(if #t 1 2 3)"));
+}
+
+test "lambda and application" {
+    var s = TestSession.init();
+    defer s.deinit();
+    try std.testing.expectEqual(@as(i64, 4), (try s.run("((lambda (x) x) 4)")).integer);
+    try std.testing.expectEqual(@as(i64, 2), (try s.run("((lambda (a b) b) 1 2)")).integer);
+    try std.testing.expectEqual(@as(i64, 9), (try s.run("((lambda () 9))")).integer);
+    // define + call, and lexical capture
+    _ = try s.run("(define id (lambda (x) x))");
+    try std.testing.expectEqual(@as(i64, 5), (try s.run("(id 5)")).integer);
+    _ = try s.run("(define k (lambda (x) (lambda () x)))");
+    try std.testing.expectEqual(@as(i64, 3), (try s.run("((k 3))")).integer);
+}
+
+test "closures see definition-site scope, not call-site" {
+    var s = TestSession.init();
+    defer s.deinit();
+    _ = try s.run("(define x 1) (define get-x (lambda () x))");
+    _ = try s.run("(define shadow (lambda (x) (get-x)))");
+    try std.testing.expectEqual(@as(i64, 1), (try s.run("(shadow 99)")).integer);
+}
+
+test "application errors" {
+    var s = TestSession.init();
+    defer s.deinit();
+    try std.testing.expectError(error.NotAProcedure, s.run("(1 2)"));
+    try std.testing.expectError(error.ArityMismatch, s.run("((lambda (x) x))"));
+    try std.testing.expectError(error.ArityMismatch, s.run("((lambda (x) x) 1 2)"));
+}
+
+test "lambda syntax errors" {
+    var s = TestSession.init();
+    defer s.deinit();
+    try std.testing.expectError(error.BadSyntax, s.run("(lambda)"));
+    try std.testing.expectError(error.BadSyntax, s.run("(lambda (x))")); // empty body
+    try std.testing.expectError(error.BadSyntax, s.run("(lambda (1) x)"));
+    try std.testing.expectError(error.BadSyntax, s.run("(lambda (x x) x)")); // dup param
 }
 
 test "define binds, returns unspecified, and persists" {
