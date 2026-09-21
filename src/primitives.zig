@@ -29,7 +29,86 @@ const table = [_]Value.Primitive{
     .{ .name = "append", .func = append },
     .{ .name = "length", .func = length },
     .{ .name = "not", .func = not },
+    .{ .name = "=", .func = numEq },
+    .{ .name = "<", .func = lt },
+    .{ .name = ">", .func = gt },
+    .{ .name = "<=", .func = le },
+    .{ .name = ">=", .func = ge },
+    .{ .name = "eqv?", .func = eqv },
+    .{ .name = "equal?", .func = equalPred },
 };
+
+fn compare(args: []const Value, comptime ok: fn (i64, i64) bool) PrimitiveError!Value {
+    if (args.len < 2) return error.ArityMismatch;
+    var prev = try asInt(args[0]);
+    for (args[1..]) |a| {
+        const cur = try asInt(a);
+        if (!ok(prev, cur)) return .{ .boolean = false };
+        prev = cur;
+    }
+    return .{ .boolean = true };
+}
+
+fn numEq(_: std.mem.Allocator, args: []const Value) PrimitiveError!Value {
+    return compare(args, struct {
+        fn f(a: i64, b: i64) bool {
+            return a == b;
+        }
+    }.f);
+}
+
+fn lt(_: std.mem.Allocator, args: []const Value) PrimitiveError!Value {
+    return compare(args, struct {
+        fn f(a: i64, b: i64) bool {
+            return a < b;
+        }
+    }.f);
+}
+
+fn gt(_: std.mem.Allocator, args: []const Value) PrimitiveError!Value {
+    return compare(args, struct {
+        fn f(a: i64, b: i64) bool {
+            return a > b;
+        }
+    }.f);
+}
+
+fn le(_: std.mem.Allocator, args: []const Value) PrimitiveError!Value {
+    return compare(args, struct {
+        fn f(a: i64, b: i64) bool {
+            return a <= b;
+        }
+    }.f);
+}
+
+fn ge(_: std.mem.Allocator, args: []const Value) PrimitiveError!Value {
+    return compare(args, struct {
+        fn f(a: i64, b: i64) bool {
+            return a >= b;
+        }
+    }.f);
+}
+
+/// §2 "Equivalence predicates": eqv? is identical to eq? in v0.
+fn eqv(_: std.mem.Allocator, args: []const Value) PrimitiveError!Value {
+    try exactly(args, 2);
+    return .{ .boolean = eqValues(args[0], args[1]) };
+}
+
+/// §2: structural — pairs recursively, strings by content, else eqv?.
+pub fn equalValues(a: Value, b: Value) bool {
+    if (@as(std.meta.Tag(Value), a) != @as(std.meta.Tag(Value), b)) return false;
+    return switch (a) {
+        .string => std.mem.eql(u8, a.string, b.string),
+        .pair => equalValues(a.pair.car, b.pair.car) and equalValues(a.pair.cdr, b.pair.cdr),
+        else => eqValues(a, b),
+    };
+}
+
+fn equalPred(_: std.mem.Allocator, args: []const Value) PrimitiveError!Value {
+    try exactly(args, 2);
+    return .{ .boolean = equalValues(args[0], args[1]) };
+}
 
 fn list(arena: std.mem.Allocator, args: []const Value) PrimitiveError!Value {
     var result: Value = .empty_list;

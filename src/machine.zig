@@ -952,6 +952,21 @@ test "differential: machine and oracle agree on a form corpus" {
         "(length 5)",
         "(not #f)",
         "(not 0)",
+        // comparisons and equivalence (7.5)
+        "(< 1 2 3)",
+        "(< 1 3 2)",
+        "(<= 1 1 2)",
+        "(> 3 2 1)",
+        "(>= 2 2 1)",
+        "(= 2 2 2)",
+        "(= 2 3)",
+        "(< 1)",
+        "(< 1 'a)",
+        "(equal? '(1 (2 \"x\")) '(1 (2 \"x\")))",
+        "(equal? '(1 2) '(1 3))",
+        "(equal? \"ab\" \"ab\")",
+        "(eqv? 'a 'a)",
+        "(eqv? \"ab\" \"ab\")",
     };
 
     for (corpus) |src| {

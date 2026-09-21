@@ -177,13 +177,5 @@ fn check(
     }
 }
 
-/// Structural equality (`equal?`-like), which is what the suite's `test`
-/// macro uses to compare results.
-fn deepEqual(a: Value, b: Value) bool {
-    if (@as(std.meta.Tag(Value), a) != @as(std.meta.Tag(Value), b)) return false;
-    return switch (a) {
-        .string => std.mem.eql(u8, a.string, b.string),
-        .pair => deepEqual(a.pair.car, b.pair.car) and deepEqual(a.pair.cdr, b.pair.cdr),
-        else => pingo.primitives.eqValues(a, b),
-    };
-}
+/// Structural equality, what the suite's `test` macro uses to compare.
+const deepEqual = pingo.primitives.equalValues;
