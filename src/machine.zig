@@ -990,6 +990,10 @@ test "differential: machine and oracle agree on a form corpus" {
         "(case 42 ((1) 'one) (else 'other))",
         "(case 42 ((1) 'one))",
         "(case)",
+        // dotted pairs (8F'.2)
+        "'(1 . 2)",
+        "(car '(1 . 2)) (cdr '(1 . 2))",
+        "(equal? (cons 1 2) '(1 . 2))",
         // cond/and/or (7.3): short-circuit means untaken positions may be unbound
         "(cond (#f 1) ((eq? 1 1) 'hit) (else 'miss))",
         "(cond (#f 1))",

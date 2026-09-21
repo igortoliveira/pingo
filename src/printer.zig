@@ -99,6 +99,7 @@ test "read-write roundtrip" {
     try expectRoundtrip("-7 #t #f foo");
     try expectRoundtrip("(1 (2 3) () \"a\\nb\" sym)");
     try expectRoundtrip("(quote x)");
+    try expectRoundtrip("(1 . 2) (1 2 . 3)");
     try expectRoundtrip("\"quote\\\" and \\\\ backslash\"");
 }
 

@@ -48,7 +48,7 @@ pub const Reader = struct {
             .boolean => return .{ .boolean = r.lexer.src[tok.start + 1] == 't' },
             .symbol => {
                 const text = r.lexer.src[tok.start..tok.end];
-                // Lone dot is dotted-pair syntax, which v0 does not support.
+                // A lone dot is only meaningful inside a list (handled there).
                 if (std.mem.eql(u8, text, ".")) return error.InvalidToken;
                 return try datum_mod.symbol(r.arena, text);
             },
@@ -73,15 +73,31 @@ pub const Reader = struct {
         if (depth > r.max_depth) return error.DepthLimitExceeded;
         var items: std.ArrayList(Datum) = .empty;
         defer items.deinit(r.arena);
+        var tail: Datum = .empty_list;
         while (true) {
             const tok = r.lexer.next();
             switch (tok.tag) {
                 .rparen => break,
                 .eof => return error.UnexpectedEndOfInput,
+                .symbol => {
+                    // `(a ... . d)`: exactly one datum after the dot, then `)`.
+                    if (std.mem.eql(u8, r.lexer.src[tok.start..tok.end], ".")) {
+                        if (items.items.len == 0) return error.InvalidToken; // (. d)
+                        const after = r.lexer.next();
+                        if (after.tag == .eof) return error.UnexpectedEndOfInput;
+                        if (after.tag == .rparen) return error.InvalidToken; // (a .)
+                        tail = try r.datum(after, depth);
+                        const close = r.lexer.next();
+                        if (close.tag == .eof) return error.UnexpectedEndOfInput;
+                        if (close.tag != .rparen) return error.InvalidToken; // (a . b c)
+                        break;
+                    }
+                    try items.append(r.arena, try r.datum(tok, depth));
+                },
                 else => try items.append(r.arena, try r.datum(tok, depth)),
             }
         }
-        var result: Datum = .empty_list;
+        var result = tail;
         var i = items.items.len;
         while (i > 0) {
             i -= 1;
@@ -173,6 +189,24 @@ test "depth limit" {
     _ = (try t2.start("(((1)))", 3).read()).?; // exactly at the limit is fine
 }
 
+test "dotted pairs" {
+    var t = TestReader.init();
+    defer t.deinit();
+    const r = t.start("(1 . 2) (1 2 . 3) '(a . b)", 8);
+
+    const d = (try r.read()).?;
+    try std.testing.expectEqual(@as(i64, 1), d.pair.car.integer);
+    try std.testing.expectEqual(@as(i64, 2), d.pair.cdr.integer);
+
+    const d2 = (try r.read()).?;
+    try std.testing.expectEqual(@as(i64, 2), d2.pair.cdr.pair.car.integer);
+    try std.testing.expectEqual(@as(i64, 3), d2.pair.cdr.pair.cdr.integer);
+
+    const d3 = (try r.read()).?; // (quote (a . b))
+    try std.testing.expectEqualStrings("a", d3.pair.cdr.pair.car.pair.car.symbol);
+    try std.testing.expectEqualStrings("b", d3.pair.cdr.pair.car.pair.cdr.symbol);
+}
+
 test "quote expands to (quote d)" {
     var t = TestReader.init();
     defer t.deinit();
@@ -204,7 +238,10 @@ test "syntax errors" {
         .{ .src = ")", .err = error.UnexpectedRightParen },
         .{ .src = "(1 2", .err = error.UnexpectedEndOfInput },
         .{ .src = "#true", .err = error.InvalidToken },
-        .{ .src = "(a . b)", .err = error.InvalidToken },
+        .{ .src = "(. b)", .err = error.InvalidToken },
+        .{ .src = "(a .)", .err = error.InvalidToken },
+        .{ .src = "(a . b c)", .err = error.InvalidToken },
+        .{ .src = ".", .err = error.InvalidToken },
         .{ .src = "99999999999999999999", .err = error.IntegerOverflow },
     };
     for (cases) |case| {
