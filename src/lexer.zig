@@ -12,6 +12,9 @@ pub const Token = struct {
         lparen,
         rparen,
         quote, // '
+        backquote, // `
+        unquote, // ,
+        unquote_splicing, // ,@
         integer,
         real, // has a fraction and/or exponent part
         symbol,
@@ -47,6 +50,15 @@ pub const Lexer = struct {
             '(' => return l.single(.lparen, start),
             ')' => return l.single(.rparen, start),
             '\'' => return l.single(.quote, start),
+            '`' => return l.single(.backquote, start),
+            ',' => {
+                l.pos += 1;
+                if (l.pos < l.src.len and l.src[l.pos] == '@') {
+                    l.pos += 1;
+                    return .{ .tag = .unquote_splicing, .start = start, .end = l.pos };
+                }
+                return .{ .tag = .unquote, .start = start, .end = l.pos };
+            },
             '0'...'9' => return l.integer(start),
             '-', '+' => {
                 if (l.pos + 1 < l.src.len and isDigit(l.src[l.pos + 1])) {

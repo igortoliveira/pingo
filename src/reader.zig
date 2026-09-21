@@ -66,15 +66,10 @@ pub const Reader = struct {
                 return try datum_mod.symbol(r.arena, text);
             },
             .string => return .{ .string = try r.decodeString(tok) },
-            .quote => {
-                // 'd reads as (quote d); the quoted datum sits one level deeper.
-                if (depth + 1 > r.max_depth) return error.DepthLimitExceeded;
-                const next = r.lexer.next();
-                if (next.tag == .eof) return error.UnexpectedEndOfInput;
-                const quoted = try r.datum(next, depth + 1);
-                const tail = try datum_mod.cons(r.arena, quoted, .empty_list);
-                return try datum_mod.cons(r.arena, try datum_mod.symbol(r.arena, "quote"), tail);
-            },
+            .quote => return r.sugar("quote", depth),
+            .backquote => return r.sugar("quasiquote", depth),
+            .unquote => return r.sugar("unquote", depth),
+            .unquote_splicing => return r.sugar("unquote-splicing", depth),
             .lparen => return try r.list(depth + 1),
             .vector_open => return try r.vector(depth + 1),
             .rparen => return error.UnexpectedRightParen,
@@ -118,6 +113,16 @@ pub const Reader = struct {
             result = try datum_mod.cons(r.arena, items.items[i], result);
         }
         return result;
+    }
+
+    /// 'd / `d / ,d / ,@d read as (<name> d); the datum sits one level deeper.
+    fn sugar(r: *Reader, name: []const u8, depth: usize) Error!Datum {
+        if (depth + 1 > r.max_depth) return error.DepthLimitExceeded;
+        const next = r.lexer.next();
+        if (next.tag == .eof) return error.UnexpectedEndOfInput;
+        const wrapped = try r.datum(next, depth + 1);
+        const tail = try datum_mod.cons(r.arena, wrapped, .empty_list);
+        return try datum_mod.cons(r.arena, try datum_mod.symbol(r.arena, name), tail);
     }
 
     fn vector(r: *Reader, depth: usize) Error!Datum {
@@ -216,6 +221,18 @@ test "depth limit" {
     var t2 = TestReader.init();
     defer t2.deinit();
     _ = (try t2.start("(((1)))", 3).read()).?; // exactly at the limit is fine
+}
+
+test "quasiquote sugar" {
+    var t = TestReader.init();
+    defer t.deinit();
+    const r = t.start("`(a ,b ,@c)", 8);
+    const d = (try r.read()).?;
+    try std.testing.expectEqualStrings("quasiquote", d.pair.car.symbol);
+    const tpl = d.pair.cdr.pair.car;
+    try std.testing.expectEqualStrings("a", tpl.pair.car.symbol);
+    try std.testing.expectEqualStrings("unquote", tpl.pair.cdr.pair.car.pair.car.symbol);
+    try std.testing.expectEqualStrings("unquote-splicing", tpl.pair.cdr.pair.cdr.pair.car.pair.car.symbol);
 }
 
 test "vector literals" {
