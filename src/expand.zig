@@ -122,6 +122,38 @@ pub fn expandOr(arena: std.mem.Allocator, form: Datum) Error!Datum {
     return try listOf(arena, &.{ lambda_form, form.pair.car });
 }
 
+/// Parsed `((n e) ...)` binding list; names are distinct symbols. Shared by
+/// both engines' native `letrec` (§2 "Derived forms II").
+pub const Bindings = struct {
+    names: []const []const u8,
+    inits: []const Datum,
+};
+
+pub fn parseBindings(arena: std.mem.Allocator, bindings: Datum) Error!Bindings {
+    var names: std.ArrayList([]const u8) = .empty;
+    defer names.deinit(arena);
+    var inits: std.ArrayList(Datum) = .empty;
+    defer inits.deinit(arena);
+
+    var b = bindings;
+    while (b == .pair) : (b = b.pair.cdr) {
+        const binding = b.pair.car;
+        if (binding != .pair or binding.pair.car != .symbol) return error.BadSyntax;
+        if (binding.pair.cdr != .pair or binding.pair.cdr.pair.cdr != .empty_list)
+            return error.BadSyntax;
+        const name = binding.pair.car.symbol;
+        for (names.items) |seen|
+            if (std.mem.eql(u8, seen, name)) return error.BadSyntax;
+        try names.append(arena, name);
+        try inits.append(arena, binding.pair.cdr.pair.car);
+    }
+    if (b != .empty_list) return error.BadSyntax;
+    return .{
+        .names = try arena.dupe([]const u8, names.items),
+        .inits = try arena.dupe(Datum, inits.items),
+    };
+}
+
 /// Wraps a non-empty expression list: single expression stays bare, several
 /// become `(begin ...)`.
 fn beginOf(arena: std.mem.Allocator, exprs: Datum) Error!Datum {

@@ -176,6 +176,23 @@ pub const Evaluator = struct {
                         d = try expand.expandLetStar(e.arena, p.cdr);
                         continue;
                     }
+                    if (isForm(p, "letrec")) {
+                        if (p.cdr != .pair) return Error.BadSyntax;
+                        var body = p.cdr.pair.cdr;
+                        var check = body;
+                        while (check == .pair) : (check = check.pair.cdr) {}
+                        if (body != .pair or check != .empty_list) return Error.BadSyntax;
+                        const b = try expand.parseBindings(e.arena, p.cdr.pair.car);
+                        const child = try Env.init(e.arena, scope);
+                        for (b.names) |name| try child.define(name, .unspecified);
+                        for (b.names, b.inits) |name, init_expr|
+                            try child.define(name, try e.eval(init_expr, child));
+                        while (body.pair.cdr == .pair) : (body = body.pair.cdr)
+                            _ = try e.eval(body.pair.car, child);
+                        d = body.pair.car; // tail position
+                        scope = child;
+                        continue;
+                    }
                     if (isForm(p, "cond")) {
                         d = try expand.expandCond(e.arena, p.cdr, scope.lookup("else") != null);
                         continue;

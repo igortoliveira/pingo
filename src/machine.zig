@@ -59,6 +59,9 @@ const Frame = union(enum) {
     /// Re-runs applyCollected after an awaited pending settles (the arriving
     /// value is ignored; forced pendings are re-read from `collected`).
     apply: struct { collected: std.ArrayList(Value) },
+    /// Native letrec (§2 Derived forms II): rebind names[index] to the
+    /// arriving value, then evaluate the next init or enter the body.
+    letrec: struct { b: expand.Bindings, index: usize, env: *Env, body: Datum },
 };
 
 pub const Machine = struct {
@@ -253,6 +256,19 @@ pub const Machine = struct {
                     return .{ .expr = .{ .d = try expand.expandLet(m.arena, p.cdr), .env = x.env } };
                 if (isForm(p, "let*"))
                     return .{ .expr = .{ .d = try expand.expandLetStar(m.arena, p.cdr), .env = x.env } };
+                if (isForm(p, "letrec")) {
+                    if (p.cdr != .pair) return Error.BadSyntax;
+                    const body = p.cdr.pair.cdr;
+                    var check = body;
+                    while (check == .pair) : (check = check.pair.cdr) {}
+                    if (body != .pair or check != .empty_list) return Error.BadSyntax;
+                    const b = try expand.parseBindings(m.arena, p.cdr.pair.car);
+                    const child = try Env.init(m.arena, x.env);
+                    for (b.names) |name| try child.define(name, .unspecified);
+                    if (b.inits.len == 0) return m.enterSequence(body, child);
+                    try m.pushFrame(.{ .letrec = .{ .b = b, .index = 0, .env = child, .body = body } });
+                    return .{ .expr = .{ .d = b.inits[0], .env = child } };
+                }
                 if (isForm(p, "cond"))
                     return .{ .expr = .{ .d = try expand.expandCond(m.arena, p.cdr, x.env.lookup("else") != null), .env = x.env } };
                 if (isForm(p, "and"))
@@ -317,6 +333,17 @@ pub const Machine = struct {
                 return m.applyCollected(app.collected);
             },
             .apply => |a| return m.applyCollected(a.collected), // v is the settled pending's value; re-read from collected
+            .letrec => |popped| {
+                var lr = popped;
+                try lr.env.define(lr.b.names[lr.index], v);
+                lr.index += 1;
+                if (lr.index < lr.b.inits.len) {
+                    const next = lr.b.inits[lr.index];
+                    try m.pushFrame(.{ .letrec = lr });
+                    return .{ .expr = .{ .d = next, .env = lr.env } };
+                }
+                return m.enterSequence(lr.body, lr.env);
+            },
             .body => |b| {
                 if (b.rest.len == 1) // tail position: push nothing
                     return .{ .expr = .{ .d = b.rest[0], .env = b.env } };
@@ -938,6 +965,12 @@ test "differential: machine and oracle agree on a form corpus" {
         "(let* ((x 1) (y (+ x 1))) (* x y))",
         "(let* ((x 1) (x (+ x 1))) x)",
         "(let* () 9)",
+        // letrec (8A.3): mutual recursion; init order left-to-right
+        "(letrec ((e? (lambda (n) (if (= n 0) #t (o? (- n 1))))) (o? (lambda (n) (if (= n 0) #f (e? (- n 1)))))) (e? 10))",
+        "(letrec () 3)",
+        "(letrec ((x 1) (y 2)) (+ x y))",
+        "(letrec ((x 1) (x 2)) x)",
+        "(letrec ((x 1)))",
         // cond/and/or (7.3): short-circuit means untaken positions may be unbound
         "(cond (#f 1) ((eq? 1 1) 'hit) (else 'miss))",
         "(cond (#f 1))",
