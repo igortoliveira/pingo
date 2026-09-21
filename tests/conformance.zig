@@ -13,7 +13,7 @@ const Value = pingo.value.Value;
 
 const suite = @embedFile("vendor/chibi-scheme/r5rs-tests.scm");
 
-const special_forms = [_][]const u8{ "quote", "if", "define", "lambda", "begin", "let", "let*", "letrec", "do", "cond", "and", "or", "else" };
+const special_forms = [_][]const u8{ "quote", "if", "define", "lambda", "begin", "let", "let*", "letrec", "do", "case", "cond", "and", "or", "else" };
 
 pub fn main(init: std.process.Init) !void {
     var stdout_buffer: [4096]u8 = undefined;
@@ -67,7 +67,7 @@ pub fn main(init: std.process.Init) !void {
     if (fail > 0) std.process.exit(1);
     // Regression floor: raise this whenever new features convert skips to
     // passes; a drop means a feature silently stopped being recognized.
-    const pass_floor = 64;
+    const pass_floor = 69;
     if (pass < pass_floor) {
         std.debug.print("conformance: pass count {d} fell below the floor {d}\n", .{ pass, pass_floor });
         std.process.exit(1);
@@ -145,6 +145,19 @@ fn check(
         },
         .pair => |p| {
             if (p.car == .symbol and std.mem.eql(u8, p.car.symbol, "quote")) return true;
+            if (p.car == .symbol and std.mem.eql(u8, p.car.symbol, "case") and p.cdr == .pair) {
+                if (!try check(arena, p.cdr.pair.car, evaluator, bound)) return false;
+                var clauses = p.cdr.pair.cdr;
+                while (clauses == .pair) : (clauses = clauses.pair.cdr) {
+                    const clause = clauses.pair.car;
+                    if (clause != .pair) return false;
+                    // clause datums are quoted data; only the body is code
+                    var body = clause.pair.cdr;
+                    while (body == .pair) : (body = body.pair.cdr)
+                        if (!try check(arena, body.pair.car, evaluator, bound)) return false;
+                }
+                return true;
+            }
             if (p.car == .symbol and std.mem.eql(u8, p.car.symbol, "do") and
                 p.cdr == .pair and p.cdr.pair.cdr == .pair)
             {

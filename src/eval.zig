@@ -176,6 +176,10 @@ pub const Evaluator = struct {
                         d = try expand.expandLetStar(e.arena, p.cdr);
                         continue;
                     }
+                    if (isForm(p, "case")) {
+                        d = try expand.expandCase(e.arena, p.cdr);
+                        continue;
+                    }
                     if (isForm(p, "do")) {
                         d = try expand.expandDo(e.arena, p.cdr);
                         continue;

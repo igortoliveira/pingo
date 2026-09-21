@@ -256,6 +256,8 @@ pub const Machine = struct {
                     return .{ .expr = .{ .d = try expand.expandLet(m.arena, p.cdr), .env = x.env } };
                 if (isForm(p, "let*"))
                     return .{ .expr = .{ .d = try expand.expandLetStar(m.arena, p.cdr), .env = x.env } };
+                if (isForm(p, "case"))
+                    return .{ .expr = .{ .d = try expand.expandCase(m.arena, p.cdr), .env = x.env } };
                 if (isForm(p, "do"))
                     return .{ .expr = .{ .d = try expand.expandDo(m.arena, p.cdr), .env = x.env } };
                 if (isForm(p, "letrec")) {
@@ -983,6 +985,11 @@ test "differential: machine and oracle agree on a form corpus" {
         "(do ((i 0)) (#t 'now))",
         "(do ((i 0 (+ i 1))) ((= i 100000) 'done))",
         "(do)",
+        // case (8A.6)
+        "(case (* 2 3) ((2 3 5 7) 'prime) ((1 4 6 8 9) 'composite))",
+        "(case 42 ((1) 'one) (else 'other))",
+        "(case 42 ((1) 'one))",
+        "(case)",
         // cond/and/or (7.3): short-circuit means untaken positions may be unbound
         "(cond (#f 1) ((eq? 1 1) 'hit) (else 'miss))",
         "(cond (#f 1))",

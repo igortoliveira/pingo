@@ -136,6 +136,51 @@ pub fn expandDo(arena: std.mem.Allocator, form: Datum) Error!Datum {
     return try listOf(arena, &.{ try datum_mod.symbol(arena, "let"), loop, bindings, if_form });
 }
 
+/// `(case key ((d ...) e ...) ... [(else e ...)])` →
+/// `(let ((t key)) (cond ((or (eqv? t 'd) ...) e ...) ... [(else e ...)]))`
+/// with `t` unreadable. The generated `cond`/`or` expand lazily, so `else`
+/// scope-hygiene applies unchanged.
+pub fn expandCase(arena: std.mem.Allocator, form: Datum) Error!Datum {
+    if (form != .pair or form.pair.cdr != .pair) return error.BadSyntax;
+    const key = form.pair.car;
+    const tmp = try datum_mod.symbol(arena, " case-key");
+
+    var cond_clauses: std.ArrayList(Datum) = .empty;
+    defer cond_clauses.deinit(arena);
+    var clauses = form.pair.cdr;
+    while (clauses == .pair) : (clauses = clauses.pair.cdr) {
+        const clause = clauses.pair.car;
+        if (clause != .pair) return error.BadSyntax;
+        if (clause.pair.car == .symbol and std.mem.eql(u8, clause.pair.car.symbol, "else")) {
+            try cond_clauses.append(arena, clause);
+            continue;
+        }
+        // ((d ...) e ...) → ((or (eqv? t 'd) ...) e ...)
+        var tests: std.ArrayList(Datum) = .empty;
+        defer tests.deinit(arena);
+        try tests.append(arena, try datum_mod.symbol(arena, "or"));
+        var datums = clause.pair.car;
+        while (datums == .pair) : (datums = datums.pair.cdr) {
+            const quoted = try listOf(arena, &.{ try datum_mod.symbol(arena, "quote"), datums.pair.car });
+            try tests.append(arena, try listOf(arena, &.{ try datum_mod.symbol(arena, "eqv?"), tmp, quoted }));
+        }
+        if (datums != .empty_list) return error.BadSyntax;
+        try cond_clauses.append(
+            arena,
+            try datum_mod.cons(arena, try listFrom(arena, tests.items), clause.pair.cdr),
+        );
+    }
+    if (clauses != .empty_list) return error.BadSyntax;
+
+    const cond_form = try datum_mod.cons(
+        arena,
+        try datum_mod.symbol(arena, "cond"),
+        try listFrom(arena, cond_clauses.items),
+    );
+    const binding = try listOf(arena, &.{try listOf(arena, &.{ tmp, key })});
+    return try listOf(arena, &.{ try datum_mod.symbol(arena, "let"), binding, cond_form });
+}
+
 /// Copies proper list `xs` with `last` appended as the final element.
 fn appendDatum(arena: std.mem.Allocator, xs: Datum, last: Datum) Error!Datum {
     var items: std.ArrayList(Datum) = .empty;
@@ -319,6 +364,14 @@ test "do expands to a loop" {
         expandDo,
         "(do ((i 0 (+ i 1))) ((= i 3)))",
         "(let  do-loop ((i 0)) (if (= i 3) (if #f #f) ( do-loop (+ i 1))))",
+    );
+}
+
+test "case expands to let + cond over eqv?" {
+    try expectExpansion(
+        expandCase,
+        "(case k ((1 2) 'small) (else 'big))",
+        "(let (( case-key k)) (cond ((or (eqv?  case-key (quote 1)) (eqv?  case-key (quote 2))) (quote small)) (else (quote big))))",
     );
 }
 
