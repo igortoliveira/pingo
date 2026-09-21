@@ -1,0 +1,19 @@
+[project]
+name = "pingo"
+version = "0.0.0"
+description = "Embeddable sandboxed Scheme with an opportunistic effect model (Python binding over libpingo)"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.optional-dependencies]
+test = ["pytest>=8"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["pingo"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
