@@ -24,10 +24,36 @@ pub const Error = error{
     OutOfMemory,
 };
 
+/// Maps a runtime error to its §3 kind symbol. OutOfMemory is the host's
+/// problem, not a guest-visible kind (heap limits arrive in Phase 4 as
+/// `limit-exceeded`).
+pub fn kindOf(err: Error) []const u8 {
+    return switch (err) {
+        Error.BadSyntax => "bad-syntax",
+        Error.UnboundVariable => "unbound-variable",
+        Error.NotAProcedure => "not-a-procedure",
+        Error.ArityMismatch => "arity-mismatch",
+        Error.TypeError => "type-error",
+        Error.DivideByZero => "divide-by-zero",
+        Error.IntegerOverflow => "integer-overflow",
+        Error.Unsupported => "bad-syntax", // unimplemented forms read as syntax for now
+        Error.OutOfMemory => "out-of-memory",
+    };
+}
+
+/// Context for the most recent error (semantics §3: kind + message +
+/// irritants). Zig errors carry no payload, so the evaluator records the
+/// human-facing part here; valid until the next eval call.
+pub const Diagnostic = struct {
+    context: []const u8, // e.g. the unbound name or the primitive involved
+};
+
 pub const Evaluator = struct {
     /// Session arena: values allocated here outlive individual reads.
     arena: std.mem.Allocator,
     global: *Env,
+    /// Set alongside the returned error when there is useful context.
+    diagnostic: ?Diagnostic = null,
 
     pub fn init(arena: std.mem.Allocator) std.mem.Allocator.Error!Evaluator {
         const global = try Env.init(arena, null);
@@ -37,6 +63,7 @@ pub const Evaluator = struct {
 
     /// Entry point for programs/REPL lines: only here `define` is legal (§2).
     pub fn evalToplevel(e: *Evaluator, d: Datum) Error!Value {
+        e.diagnostic = null;
         if (d == .pair and isForm(d.pair, "define")) {
             const args = d.pair.cdr;
             if (args != .pair or args.pair.car != .symbol) return Error.BadSyntax;
@@ -57,7 +84,10 @@ pub const Evaluator = struct {
             .string => |s| return .{ .string = try e.arena.dupe(u8, s) },
             // () is not a valid expression, only a value produced by quote.
             .empty_list => return Error.BadSyntax,
-            .symbol => |name| return scope.lookup(name) orelse Error.UnboundVariable,
+            .symbol => |name| return scope.lookup(name) orelse {
+                e.diagnostic = .{ .context = name };
+                return Error.UnboundVariable;
+            },
             .pair => |p| {
                 if (isForm(p, "quote")) {
                     if (p.cdr != .pair or p.cdr.pair.cdr != .empty_list) return Error.BadSyntax;
@@ -150,7 +180,10 @@ pub const Evaluator = struct {
                 for (c.body) |bd| result = try e.eval(bd, child);
                 return result;
             },
-            .primitive => |p| return p.func(e.arena, args),
+            .primitive => |p| return p.func(e.arena, args) catch |err| {
+                e.diagnostic = .{ .context = p.name };
+                return err;
+            },
             else => return Error.NotAProcedure,
         }
     }
@@ -380,6 +413,25 @@ test "eq? identity semantics" {
     _ = try s.run("(define f (lambda (x) x))");
     try std.testing.expectEqual(true, (try s.run("(eq? f f)")).boolean);
     try std.testing.expectEqual(false, (try s.run("(eq? f (lambda (x) x))")).boolean);
+}
+
+test "errors carry §3 kind and context, never panic" {
+    var s = TestSession.init();
+    defer s.deinit();
+
+    try std.testing.expectError(error.UnboundVariable, s.run("mystery"));
+    try std.testing.expectEqualStrings("mystery", s.evaluator.?.diagnostic.?.context);
+    try std.testing.expectEqualStrings("unbound-variable", kindOf(error.UnboundVariable));
+
+    try std.testing.expectError(error.DivideByZero, s.run("(/ 1 0)"));
+    try std.testing.expectEqualStrings("/", s.evaluator.?.diagnostic.?.context);
+
+    // diagnostic clears on the next successful toplevel eval
+    _ = try s.run("1");
+    try std.testing.expectEqual(@as(?Diagnostic, null), s.evaluator.?.diagnostic);
+
+    // the session stays usable after any error (§3)
+    try std.testing.expectEqual(@as(i64, 2), (try s.run("(+ 1 1)")).integer);
 }
 
 test "define binds, returns unspecified, and persists" {
