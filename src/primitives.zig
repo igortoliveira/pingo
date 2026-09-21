@@ -12,6 +12,20 @@ const PrimitiveError = value_mod.PrimitiveError;
 pub fn install(scope: *env_mod.Env) std.mem.Allocator.Error!void {
     for (&table) |*p| try scope.define(p.name, .{ .primitive = p });
     try scope.define(apply_primitive.name, .{ .primitive = &apply_primitive });
+    try scope.define(callcc_primitive.name, .{ .primitive = &callcc_primitive });
+}
+
+/// `call/cc` is engine-level like `apply`: a primitive cannot capture the
+/// continuation, so the machine intercepts this sentinel by identity. The
+/// oracle does not implement it (docs/callcc.md); its stub errors.
+pub const callcc_primitive = Value.Primitive{
+    .name = "call/cc",
+    .func = callccStub,
+    .strict_args = false, // the machine intercepts before args matter
+};
+
+fn callccStub(_: std.mem.Allocator, _: []const Value) PrimitiveError!Value {
+    return error.TypeError;
 }
 
 /// `apply` is engine-level (§2): a primitive cannot invoke procedures, so the
@@ -215,7 +229,7 @@ fn isBoolean(_: std.mem.Allocator, args: []const Value) PrimitiveError!Value {
 fn isProcedure(_: std.mem.Allocator, args: []const Value) PrimitiveError!Value {
     try exactly(args, 1);
     return .{ .boolean = switch (args[0]) {
-        .closure, .primitive, .capability => true,
+        .closure, .primitive, .capability, .continuation => true,
         else => false,
     } };
 }
@@ -1012,6 +1026,7 @@ pub fn eqValues(a: Value, b: Value) bool {
         .primitive => a.primitive == b.primitive,
         .capability => a.capability == b.capability,
         .pending => a.pending == b.pending,
+        .continuation => a.continuation == b.continuation,
         .vector => a.vector.ptr == b.vector.ptr and a.vector.len == b.vector.len,
     };
 }

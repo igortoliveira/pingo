@@ -24,6 +24,10 @@ pub const Error = error{
     HostError,
     LimitExceeded,
     Unsupported, // placeholder for plan items not landed yet
+    /// The reference oracle does not implement `call/cc` (design decision,
+    /// docs/callcc.md): first-class continuations need the machine's explicit
+    /// frame stack. The machine handles it; the oracle reports this.
+    Unimplemented,
     OutOfMemory,
 };
 
@@ -58,6 +62,7 @@ pub fn kindOf(err: Error) []const u8 {
         Error.HostError => "host-error",
         Error.LimitExceeded => "limit-exceeded",
         Error.Unsupported => "bad-syntax", // unimplemented forms read as syntax for now
+        Error.Unimplemented => "unimplemented",
         Error.OutOfMemory => "limit-exceeded",
     };
 }
@@ -313,6 +318,7 @@ pub const Evaluator = struct {
                 return result;
             },
             .primitive => |p| {
+                if (p == &primitives.callcc_primitive) return Error.Unimplemented;
                 if (p == &primitives.apply_primitive) {
                     // (apply f a ... args): spread the final list.
                     if (args.len < 2) return Error.ArityMismatch;

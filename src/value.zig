@@ -42,6 +42,12 @@ pub const Value = union(enum) {
     /// Internal placeholder for an outstanding external call (§4 "Pending
     /// values"). Never guest-detectable; forced at strictness points.
     pending: *Pending,
+    /// First-class continuation captured by `call/cc` (tier 8H″). The layout
+    /// (a frame-stack snapshot) belongs to the machine; here it is an opaque
+    /// identity, compared by pointer. `docs/callcc.md`.
+    continuation: *Continuation,
+
+    pub const Continuation = opaque {};
 
     pub const Pair = struct { car: Value, cdr: Value };
 
@@ -110,7 +116,7 @@ fn isPureDataInner(v0: Value, depth: usize, budget: *usize) bool {
                     if (!isPureDataInner(item, depth + 1, budget)) return false;
                 return true;
             },
-            .closure, .primitive, .capability => return false,
+            .closure, .primitive, .capability, .continuation => return false,
             // Deep force substitutes resolved pendings before this check runs.
             .pending => return false,
         }

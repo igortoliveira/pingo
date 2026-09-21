@@ -152,11 +152,8 @@
         (apply consumer (vector-ref v 1))
         (consumer v))))
 
-;; dynamic-wind (S2 dynamic-wind): plain sequencing until call/cc exists —
-;; no control transfer can enter or leave the extent, and an abort (S3)
-;; never runs after-thunks. The call/cc design doc must revisit this.
-(define (dynamic-wind before thunk after)
-  (before)
-  (let ((result (thunk)))
-    (after)
-    result))
+;; dynamic-wind is engine-level once call/cc exists (tier 8H''): the plain
+;; sequencing version was unsound under re-entry (no unwind/rewind), so it is
+;; withdrawn here and reintroduced natively in the next commit.
+
+(define call-with-current-continuation call/cc)

@@ -75,6 +75,35 @@ const Frame = union(enum) {
     letrec: struct { b: expand.Bindings, index: usize, env: *Env, body: Datum },
 };
 
+/// A captured continuation (tier 8H″): a clone of the frame stack at the
+/// `call/cc` call site. `Value.continuation` points here (opaquely).
+const Snapshot = struct { frames: []Frame };
+
+/// Deep-copies the frame stack for a continuation snapshot. Frames hold
+/// immutable data (`Datum`, `Env`, slices, `Bindings`) which is shared;
+/// the `app`/`apply` `collected` buffers mutate in place as arguments
+/// arrive, so those are duplicated (docs/callcc.md).
+fn cloneFrames(arena: std.mem.Allocator, frames: []const Frame) std.mem.Allocator.Error![]Frame {
+    const out = try arena.alloc(Frame, frames.len);
+    for (frames, out) |src, *dst| {
+        dst.* = src;
+        switch (src) {
+            .app => |a| {
+                var c: std.ArrayList(Value) = .empty;
+                try c.appendSlice(arena, a.collected.items);
+                dst.app.collected = c;
+            },
+            .apply => |a| {
+                var c: std.ArrayList(Value) = .empty;
+                try c.appendSlice(arena, a.collected.items);
+                dst.apply.collected = c;
+            },
+            else => {},
+        }
+    }
+    return out;
+}
+
 pub const Machine = struct {
     arena: std.mem.Allocator,
     global: *Env,
@@ -492,6 +521,8 @@ pub const Machine = struct {
                 return .{ .expr = .{ .d = c.body[0], .env = child } };
             },
             .primitive => |prim| {
+                if (prim == &primitives.callcc_primitive)
+                    return m.captureContinuation(collected);
                 if (prim == &primitives.apply_primitive)
                     return m.applySpread(collected);
                 if (prim.strict_args) for (args, 0..) |a, i| {
@@ -558,8 +589,44 @@ pub const Machine = struct {
                 try m.feed_calls.append(m.arena, p);
                 return .{ .value = .{ .pending = p } };
             },
+            .continuation => |k| {
+                // Invoking k abandons the current control and continues the
+                // captured one with the single supplied value (§2 call/cc).
+                if (args.len != 1) return Error.ArityMismatch;
+                const snap: *const Snapshot = @ptrCast(@alignCast(k));
+                // A continuation captured under a larger budget cannot smuggle
+                // depth past a reduced call_depth (§5).
+                if (snap.frames.len > m.limits.call_depth) {
+                    m.diagnostic = .{ .context = "call-depth" };
+                    return Error.LimitExceeded;
+                }
+                try m.chargeFuelN(snap.frames.len);
+                // Fresh clone on invoke, not just capture: multi-shot safety —
+                // the live stack mutates its collected buffers, the snapshot
+                // must not (docs/callcc.md).
+                m.frames.clearRetainingCapacity();
+                try m.frames.appendSlice(m.arena, try cloneFrames(m.arena, snap.frames));
+                return .{ .value = args[0] };
+            },
             else => return Error.NotAProcedure,
         }
+    }
+
+    /// `(call/cc f)`: the app frame that collected the operands is already
+    /// popped, so `m.frames` *is* the continuation of this call. Snapshot it
+    /// into a continuation value and re-enter as `(f k)` (§2, docs/callcc.md).
+    fn captureContinuation(m: *Machine, collected: std.ArrayList(Value)) Error!Control {
+        const items = collected.items;
+        if (items.len != 2) return Error.ArityMismatch; // call/cc + one proc
+        try m.chargeFuelN(m.frames.items.len);
+        const snap = try m.arena.create(Snapshot);
+        snap.* = .{ .frames = try cloneFrames(m.arena, m.frames.items) };
+        const k: Value = .{ .continuation = @ptrCast(snap) };
+
+        var reapply: std.ArrayList(Value) = .empty;
+        try reapply.append(m.arena, items[1]); // the procedure
+        try reapply.append(m.arena, k);
+        return m.applyCollected(reapply);
     }
 
     /// (apply f a ... args): rebuild the application as f a ... plus the
@@ -716,6 +783,18 @@ pub const Machine = struct {
         m.fuel_used += 1;
     }
 
+    /// Charges `n` fuel at once (§5): continuation capture/invoke copies the
+    /// frame stack, which is O(depth) work and must cost O(depth) fuel or the
+    /// counter stops measuring work (docs/callcc.md).
+    fn chargeFuelN(m: *Machine, n: usize) Error!void {
+        if (m.limits.fuel - m.fuel_used < n) {
+            m.fuel_used = m.limits.fuel;
+            m.diagnostic = .{ .context = "fuel" };
+            return Error.LimitExceeded;
+        }
+        m.fuel_used += n;
+    }
+
     /// §5 call_depth, realized as a bound on live frames (tail positions push
     /// nothing, so tail calls consume no depth).
     fn pushFrame(m: *Machine, frame: Frame) Error!void {
@@ -850,6 +929,36 @@ test "machine: recursion and lexical capture" {
 
     _ = try t.run("(define k (lambda (x) (lambda () x)))");
     try std.testing.expectEqual(@as(i64, 3), (try t.run("((k 3))")).integer);
+}
+
+test "machine: call/cc capture and invoke (machine-only; oracle Unimplemented)" {
+    var t = TestMachine.init();
+    defer t.deinit();
+
+    // escape: k abandons the (+ 1 _) that surrounds the call
+    try std.testing.expectEqual(@as(i64, 42), (try t.run("(call/cc (lambda (k) (+ 1 (k 42))))")).integer);
+    // no escape: the receiver's value is the call/cc value
+    try std.testing.expectEqual(@as(i64, 15), (try t.run("(+ 10 (call/cc (lambda (k) 5)))")).integer);
+    // alias
+    try std.testing.expectEqual(@as(i64, 6), (try t.run("(call-with-current-continuation (lambda (k) (* 2 3)))")).integer);
+    // arity: k takes exactly one value
+    try std.testing.expectError(error.ArityMismatch, t.run("(call/cc (lambda (k) (k 1 2)))"));
+    try std.testing.expectError(error.ArityMismatch, t.run("(call/cc)"));
+
+    // multi-shot re-entry with shared bindings: set! accumulates across the
+    // three invocations (variables are shared, not captured — docs/callcc.md)
+    try std.testing.expectEqual(@as(i64, 6), (try t.run(
+        \\(let ((saved #f) (count 0) (sum 0))
+        \\  (let ((n (call/cc (lambda (k) (set! saved k) 1))))
+        \\    (set! sum (+ sum n))
+        \\    (set! count (+ count 1))
+        \\    (if (< count 3) (saved (+ n 1)) sum)))
+    )).integer);
+
+    // the oracle refuses call/cc
+    var ts = eval_mod.TestSession.init();
+    defer ts.deinit();
+    try std.testing.expectError(error.Unimplemented, ts.run("(call/cc (lambda (k) 1))"));
 }
 
 test "machine: tail calls keep the frame stack flat" {
