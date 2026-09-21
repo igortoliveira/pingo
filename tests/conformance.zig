@@ -23,7 +23,7 @@ pub fn main(init: std.process.Init) !void {
     var arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
-    var evaluator = try pingo.eval.Evaluator.init(arena);
+    var evaluator = try pingo.eval.Evaluator.init(arena, .{ .fuel = 100_000_000 });
 
     var pass: usize = 0;
     var fail: usize = 0;

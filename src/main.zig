@@ -4,6 +4,9 @@ const pingo = @import("pingo");
 const max_line_bytes = 4096;
 const max_read_depth = 64;
 
+// The REPL is the host here (§5): each line gets a fresh fuel budget.
+const repl_limits: pingo.eval.Limits = .{ .fuel = 10_000_000 };
+
 pub fn main(init: std.process.Init) !void {
     var stdin_buffer: [max_line_bytes]u8 = undefined;
     var stdin_reader: std.Io.File.Reader = .init(.stdin(), init.io, &stdin_buffer);
@@ -16,7 +19,7 @@ pub fn main(init: std.process.Init) !void {
     var session_arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer session_arena_state.deinit();
     const session_arena = session_arena_state.allocator();
-    var evaluator = try pingo.eval.Evaluator.init(session_arena);
+    var evaluator = try pingo.eval.Evaluator.init(session_arena, repl_limits);
 
     while (true) {
         try out.writeAll("pingo> ");
@@ -34,6 +37,7 @@ pub fn main(init: std.process.Init) !void {
         // Session arena: definitions and closure bodies must outlive the
         // line that read them, so datums are read into the same arena.
         var reader = pingo.reader.Reader.init(session_arena, line, max_read_depth);
+        evaluator.fuel_used = 0; // fresh budget per line
 
         while (true) {
             const d = reader.read() catch |err| {

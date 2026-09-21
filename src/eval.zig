@@ -20,8 +20,18 @@ pub const Error = error{
     TypeError,
     DivideByZero,
     IntegerOverflow,
+    LimitExceeded,
     Unsupported, // placeholder for plan items not landed yet
     OutOfMemory,
+};
+
+/// Session resource limits (semantics §5). Set by the host at session
+/// creation; there are deliberately no defaults here.
+pub const Limits = struct {
+    /// Evaluation steps (one per eval loop iteration, including tail
+    /// iterations). The counter is `fuel_used`; the host may reset it
+    /// between feeds (e.g. a REPL giving each line a fresh budget).
+    fuel: u64,
 };
 
 /// Maps a runtime error to its §3 kind symbol. OutOfMemory is the host's
@@ -36,6 +46,7 @@ pub fn kindOf(err: Error) []const u8 {
         Error.TypeError => "type-error",
         Error.DivideByZero => "divide-by-zero",
         Error.IntegerOverflow => "integer-overflow",
+        Error.LimitExceeded => "limit-exceeded",
         Error.Unsupported => "bad-syntax", // unimplemented forms read as syntax for now
         Error.OutOfMemory => "out-of-memory",
     };
@@ -52,13 +63,23 @@ pub const Evaluator = struct {
     /// Session arena: values allocated here outlive individual reads.
     arena: std.mem.Allocator,
     global: *Env,
+    limits: Limits,
+    fuel_used: u64 = 0,
     /// Set alongside the returned error when there is useful context.
     diagnostic: ?Diagnostic = null,
 
-    pub fn init(arena: std.mem.Allocator) std.mem.Allocator.Error!Evaluator {
+    pub fn init(arena: std.mem.Allocator, limits: Limits) std.mem.Allocator.Error!Evaluator {
         const global = try Env.init(arena, null);
         try primitives.install(global);
-        return .{ .arena = arena, .global = global };
+        return .{ .arena = arena, .global = global, .limits = limits };
+    }
+
+    fn chargeFuel(e: *Evaluator) Error!void {
+        if (e.fuel_used >= e.limits.fuel) {
+            e.diagnostic = .{ .context = "fuel" };
+            return Error.LimitExceeded;
+        }
+        e.fuel_used += 1;
     }
 
     /// Entry point for programs/REPL lines: only here `define` is legal (§2).
@@ -83,90 +104,93 @@ pub const Evaluator = struct {
     pub fn eval(e: *Evaluator, d0: Datum, scope0: *Env) Error!Value {
         var d = d0;
         var scope = scope0;
-        while (true) switch (d) {
-            // Self-evaluating literals (semantics §2).
-            .integer => |n| return .{ .integer = n },
-            .boolean => |b| return .{ .boolean = b },
-            .string => |s| return .{ .string = try e.arena.dupe(u8, s) },
-            // () is not a valid expression, only a value produced by quote.
-            .empty_list => return Error.BadSyntax,
-            .symbol => |name| return scope.lookup(name) orelse {
-                e.diagnostic = .{ .context = name };
-                return Error.UnboundVariable;
-            },
-            .pair => |p| {
-                if (isForm(p, "quote")) {
-                    if (p.cdr != .pair or p.cdr.pair.cdr != .empty_list) return Error.BadSyntax;
-                    return try value_mod.fromDatum(e.arena, p.cdr.pair.car);
-                }
-                if (isForm(p, "define")) return Error.BadSyntax; // top level only (§2)
-                if (isForm(p, "if")) {
-                    // (if c t) or (if c t e); c evaluates first, then exactly
-                    // one branch (§2).
-                    const c = p.cdr;
-                    if (c != .pair or c.pair.cdr != .pair) return Error.BadSyntax;
-                    const t = c.pair.cdr.pair;
-                    var alt: ?Datum = null;
-                    switch (t.cdr) {
-                        .empty_list => {},
-                        .pair => |a| {
-                            if (a.cdr != .empty_list) return Error.BadSyntax;
-                            alt = a.car;
-                        },
-                        else => return Error.BadSyntax,
+        while (true) {
+            try e.chargeFuel();
+            switch (d) {
+                // Self-evaluating literals (semantics §2).
+                .integer => |n| return .{ .integer = n },
+                .boolean => |b| return .{ .boolean = b },
+                .string => |s| return .{ .string = try e.arena.dupe(u8, s) },
+                // () is not a valid expression, only a value produced by quote.
+                .empty_list => return Error.BadSyntax,
+                .symbol => |name| return scope.lookup(name) orelse {
+                    e.diagnostic = .{ .context = name };
+                    return Error.UnboundVariable;
+                },
+                .pair => |p| {
+                    if (isForm(p, "quote")) {
+                        if (p.cdr != .pair or p.cdr.pair.cdr != .empty_list) return Error.BadSyntax;
+                        return try value_mod.fromDatum(e.arena, p.cdr.pair.car);
                     }
-                    const cond = try e.eval(c.pair.car, scope);
-                    if (isTruthy(cond)) {
-                        d = t.car; // tail position
+                    if (isForm(p, "define")) return Error.BadSyntax; // top level only (§2)
+                    if (isForm(p, "if")) {
+                        // (if c t) or (if c t e); c evaluates first, then exactly
+                        // one branch (§2).
+                        const c = p.cdr;
+                        if (c != .pair or c.pair.cdr != .pair) return Error.BadSyntax;
+                        const t = c.pair.cdr.pair;
+                        var alt: ?Datum = null;
+                        switch (t.cdr) {
+                            .empty_list => {},
+                            .pair => |a| {
+                                if (a.cdr != .empty_list) return Error.BadSyntax;
+                                alt = a.car;
+                            },
+                            else => return Error.BadSyntax,
+                        }
+                        const cond = try e.eval(c.pair.car, scope);
+                        if (isTruthy(cond)) {
+                            d = t.car; // tail position
+                            continue;
+                        }
+                        if (alt) |a| {
+                            d = a; // tail position
+                            continue;
+                        }
+                        return .unspecified;
+                    }
+                    if (isForm(p, "lambda")) return e.makeClosure(p.cdr, scope);
+                    if (isForm(p, "begin")) {
+                        // (begin e1 ... en), n >= 1: sequential by definition (§2).
+                        var rest = p.cdr;
+                        if (rest != .pair) return Error.BadSyntax;
+                        // Validate the shape first so (begin 1 . 2) can't run e1.
+                        var check = rest;
+                        while (check == .pair) : (check = check.pair.cdr) {}
+                        if (check != .empty_list) return Error.BadSyntax;
+                        while (rest.pair.cdr == .pair) : (rest = rest.pair.cdr)
+                            _ = try e.eval(rest.pair.car, scope);
+                        d = rest.pair.car; // tail position
                         continue;
                     }
-                    if (alt) |a| {
-                        d = a; // tail position
-                        continue;
-                    }
-                    return .unspecified;
-                }
-                if (isForm(p, "lambda")) return e.makeClosure(p.cdr, scope);
-                if (isForm(p, "begin")) {
-                    // (begin e1 ... en), n >= 1: sequential by definition (§2).
+
+                    // Application. The reference evaluator picks left-to-right,
+                    // one of the sequential orders §2 allows.
+                    const op = try e.eval(p.car, scope);
+                    var args: std.ArrayList(Value) = .empty;
+                    defer args.deinit(e.arena);
                     var rest = p.cdr;
-                    if (rest != .pair) return Error.BadSyntax;
-                    // Validate the shape first so (begin 1 . 2) can't run e1.
-                    var check = rest;
-                    while (check == .pair) : (check = check.pair.cdr) {}
-                    if (check != .empty_list) return Error.BadSyntax;
-                    while (rest.pair.cdr == .pair) : (rest = rest.pair.cdr)
-                        _ = try e.eval(rest.pair.car, scope);
-                    d = rest.pair.car; // tail position
-                    continue;
-                }
+                    while (rest == .pair) : (rest = rest.pair.cdr)
+                        try args.append(e.arena, try e.eval(rest.pair.car, scope));
+                    if (rest != .empty_list) return Error.BadSyntax;
 
-                // Application. The reference evaluator picks left-to-right,
-                // one of the sequential orders §2 allows.
-                const op = try e.eval(p.car, scope);
-                var args: std.ArrayList(Value) = .empty;
-                defer args.deinit(e.arena);
-                var rest = p.cdr;
-                while (rest == .pair) : (rest = rest.pair.cdr)
-                    try args.append(e.arena, try e.eval(rest.pair.car, scope));
-                if (rest != .empty_list) return Error.BadSyntax;
-
-                switch (op) {
-                    .closure => |c| {
-                        // Inline the closure call so its last body expression
-                        // is a tail position of this loop.
-                        if (args.items.len != c.params.len) return Error.ArityMismatch;
-                        const child = try Env.init(e.arena, c.env);
-                        for (c.params, args.items) |name, v| try child.define(name, v);
-                        for (c.body[0 .. c.body.len - 1]) |bd| _ = try e.eval(bd, child);
-                        d = c.body[c.body.len - 1];
-                        scope = child;
-                        continue;
-                    },
-                    else => return e.apply(op, args.items),
-                }
-            },
-        };
+                    switch (op) {
+                        .closure => |c| {
+                            // Inline the closure call so its last body expression
+                            // is a tail position of this loop.
+                            if (args.items.len != c.params.len) return Error.ArityMismatch;
+                            const child = try Env.init(e.arena, c.env);
+                            for (c.params, args.items) |name, v| try child.define(name, v);
+                            for (c.body[0 .. c.body.len - 1]) |bd| _ = try e.eval(bd, child);
+                            d = c.body[c.body.len - 1];
+                            scope = child;
+                            continue;
+                        },
+                        else => return e.apply(op, args.items),
+                    }
+                },
+            }
+        }
     }
 
     fn makeClosure(e: *Evaluator, form: Datum, scope: *Env) Error!Value {
@@ -243,11 +267,15 @@ pub const TestSession = struct {
         s.arena_state.deinit();
     }
 
+    /// Generous defaults so ordinary tests never trip limits; limit tests
+    /// construct their own evaluator or shrink these.
+    pub const test_limits: Limits = .{ .fuel = 100_000_000 };
+
     /// Reads and evaluates every datum in `src`, returning the last result.
     /// The global environment persists across `run` calls within a session.
     pub fn run(s: *TestSession, src: []const u8) !Value {
         const arena = s.arena_state.allocator();
-        if (s.evaluator == null) s.evaluator = try Evaluator.init(arena);
+        if (s.evaluator == null) s.evaluator = try Evaluator.init(arena, test_limits);
         s.evaluator.?.arena = arena;
         var r = reader_mod.Reader.init(arena, src, 32);
         var last: Value = .unspecified;
@@ -461,6 +489,32 @@ test "errors carry §3 kind and context, never panic" {
 
     // the session stays usable after any error (§3)
     try std.testing.expectEqual(@as(i64, 2), (try s.run("(+ 1 1)")).integer);
+}
+
+test "fuel exhaustion is limit-exceeded and uncatchable by the guest" {
+    var s = TestSession.init();
+    defer s.deinit();
+    _ = try s.run("(define loop (lambda (n) (if (eq? n 0) 'done (loop (- n 1)))))");
+
+    s.evaluator.?.limits.fuel = s.evaluator.?.fuel_used + 1_000;
+    try std.testing.expectError(error.LimitExceeded, s.run("(loop 1000000)"));
+    try std.testing.expectEqualStrings("fuel", s.evaluator.?.diagnostic.?.context);
+    try std.testing.expectEqualStrings("limit-exceeded", kindOf(error.LimitExceeded));
+
+    // The host can refill fuel and keep the session (host's contract, §5).
+    s.evaluator.?.limits.fuel = TestSession.test_limits.fuel;
+    try std.testing.expectEqualStrings("done", (try s.run("(loop 10)")).symbol);
+}
+
+test "fuel counts work, not wall time" {
+    var s = TestSession.init();
+    defer s.deinit();
+    _ = try s.run("1"); // force evaluator creation
+    const before = s.evaluator.?.fuel_used;
+    _ = try s.run("(+ 1 (+ 2 3))");
+    const spent = s.evaluator.?.fuel_used - before;
+    // (+ 1 (+ 2 3)): 7 evals — outer form, +, 1, inner form, +, 2, 3.
+    try std.testing.expectEqual(@as(u64, 7), spent);
 }
 
 test "tail calls do not grow the stack" {
