@@ -28,6 +28,20 @@ pub fn build(b: *std.Build) void {
     const run_step = b.step("run", "Run the app");
     run_step.dependOn(&run_cmd.step);
 
+    const conformance = b.addExecutable(.{
+        .name = "conformance",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/conformance.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "pingo", .module = mod },
+            },
+        }),
+    });
+    const conformance_step = b.step("conformance", "Run the r5rs conformance suite");
+    conformance_step.dependOn(&b.addRunArtifact(conformance).step);
+
     const mod_tests = b.addTest(.{ .root_module = mod });
     const exe_tests = b.addTest(.{ .root_module = exe.root_module });
     const test_step = b.step("test", "Run tests");
