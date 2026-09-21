@@ -28,7 +28,7 @@ pub const Value = union(enum) {
     boolean: bool,
     char: u8,
     symbol: []const u8,
-    string: []const u8,
+    string: []u8, // mutable bytes (§1); literals evaluate to fresh copies
     pair: *Pair,
     empty_list,
     unspecified,

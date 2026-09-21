@@ -14,10 +14,10 @@ const StubHost = struct {
 
     /// Every stub returns a value derived from nothing — programs only need
     /// values to flow, not to mean anything.
-    fn handle(ctx: *anyopaque, _: std.mem.Allocator, _: []const Value) pingo.capability.HostError!Value {
+    fn handle(ctx: *anyopaque, arena: std.mem.Allocator, _: []const Value) pingo.capability.HostError!Value {
         const h: *StubHost = @ptrCast(@alignCast(ctx));
         h.calls += 1;
-        return .{ .string = "stub-result" };
+        return .{ .string = try arena.dupe(u8, "stub-result") };
     }
 };
 
@@ -53,7 +53,7 @@ fn runProgram(src: []const u8, host: *StubHost, caps: []pingo.capability.Capabil
     while (try r.read()) |d| last = try evaluator.runToCompletion(d);
     // Values referencing the arena die here; callers only inspect the tag.
     return switch (last) {
-        .string => .{ .string = "" },
+        .string => .unspecified, // arena-owned bytes die with this frame
         else => last,
     };
 }
@@ -98,7 +98,7 @@ fn runShuffled(src: []const u8, seed: u64, out: *std.Io.Writer.Allocating) !usiz
             const calls = machine.outstanding();
             const pick = calls[random.intRangeLessThan(usize, 0, calls.len)];
             dispatched += 1;
-            machine.resolve(pick, .{ .string = "stub-result" });
+            machine.resolve(pick, .{ .string = try arena.dupe(u8, "stub-result") });
             outcome = try machine.continueRun();
         }
         last = outcome.value;

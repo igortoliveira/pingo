@@ -81,7 +81,186 @@ const table = [_]Value.Primitive{
     .{ .name = "char-whitespace?", .func = charWhitespace },
     .{ .name = "char-upper-case?", .func = charUpper },
     .{ .name = "char-lower-case?", .func = charLower },
+    .{ .name = "string?", .func = isString },
+    .{ .name = "make-string", .func = makeString },
+    .{ .name = "string", .func = stringOfChars },
+    .{ .name = "string-length", .func = stringLength },
+    .{ .name = "string-ref", .func = stringRef },
+    .{ .name = "string-set!", .func = stringSet },
+    .{ .name = "substring", .func = substringFn },
+    .{ .name = "string-append", .func = stringAppend },
+    .{ .name = "string-copy", .func = stringCopy },
+    .{ .name = "string-fill!", .func = stringFill },
+    .{ .name = "string->list", .func = stringToList },
+    .{ .name = "list->string", .func = listToString },
+    .{ .name = "string=?", .func = strEq },
+    .{ .name = "string<?", .func = strLt },
+    .{ .name = "string>?", .func = strGt },
+    .{ .name = "string<=?", .func = strLe },
+    .{ .name = "string>=?", .func = strGe },
+    .{ .name = "string-ci=?", .func = strCiEq },
 };
+
+fn asString(v: Value) PrimitiveError![]u8 {
+    return if (v == .string) v.string else error.TypeError;
+}
+
+fn isString(_: std.mem.Allocator, args: []const Value) PrimitiveError!Value {
+    try exactly(args, 1);
+    return .{ .boolean = args[0] == .string };
+}
+
+fn makeString(arena: std.mem.Allocator, args: []const Value) PrimitiveError!Value {
+    if (args.len < 1 or args.len > 2) return error.ArityMismatch;
+    const k = try asInt(args[0]);
+    if (k < 0 or k > 100_000_000) return error.TypeError;
+    const fill: u8 = if (args.len == 2) try asChar(args[1]) else ' ';
+    const bytes = try arena.alloc(u8, @intCast(k));
+    @memset(bytes, fill);
+    return .{ .string = bytes };
+}
+
+fn stringOfChars(arena: std.mem.Allocator, args: []const Value) PrimitiveError!Value {
+    const bytes = try arena.alloc(u8, args.len);
+    for (args, 0..) |a, i| bytes[i] = try asChar(a);
+    return .{ .string = bytes };
+}
+
+fn stringLength(_: std.mem.Allocator, args: []const Value) PrimitiveError!Value {
+    try exactly(args, 1);
+    return .{ .integer = @intCast((try asString(args[0])).len) };
+}
+
+fn stringIndex(s: []const u8, v: Value) PrimitiveError!usize {
+    const k = try asInt(v);
+    if (k < 0 or k >= s.len) return error.TypeError;
+    return @intCast(k);
+}
+
+fn stringRef(_: std.mem.Allocator, args: []const Value) PrimitiveError!Value {
+    try exactly(args, 2);
+    const s = try asString(args[0]);
+    return .{ .char = s[try stringIndex(s, args[1])] };
+}
+
+fn stringSet(_: std.mem.Allocator, args: []const Value) PrimitiveError!Value {
+    try exactly(args, 3);
+    const s = try asString(args[0]);
+    s[try stringIndex(s, args[1])] = try asChar(args[2]);
+    return .unspecified;
+}
+
+fn substringFn(arena: std.mem.Allocator, args: []const Value) PrimitiveError!Value {
+    try exactly(args, 3);
+    const s = try asString(args[0]);
+    const start = try asInt(args[1]);
+    const end = try asInt(args[2]);
+    if (start < 0 or end < start or end > s.len) return error.TypeError;
+    return .{ .string = try arena.dupe(u8, s[@intCast(start)..@intCast(end)]) };
+}
+
+fn stringAppend(arena: std.mem.Allocator, args: []const Value) PrimitiveError!Value {
+    var total: usize = 0;
+    for (args) |a| total += (try asString(a)).len;
+    const bytes = try arena.alloc(u8, total);
+    var at: usize = 0;
+    for (args) |a| {
+        const part = try asString(a);
+        @memcpy(bytes[at .. at + part.len], part);
+        at += part.len;
+    }
+    return .{ .string = bytes };
+}
+
+fn stringCopy(arena: std.mem.Allocator, args: []const Value) PrimitiveError!Value {
+    try exactly(args, 1);
+    return .{ .string = try arena.dupe(u8, try asString(args[0])) };
+}
+
+fn stringFill(_: std.mem.Allocator, args: []const Value) PrimitiveError!Value {
+    try exactly(args, 2);
+    @memset(try asString(args[0]), try asChar(args[1]));
+    return .unspecified;
+}
+
+fn stringToList(arena: std.mem.Allocator, args: []const Value) PrimitiveError!Value {
+    try exactly(args, 1);
+    const s = try asString(args[0]);
+    var result: Value = .empty_list;
+    var i = s.len;
+    while (i > 0) {
+        i -= 1;
+        const p = try arena.create(Value.Pair);
+        p.* = .{ .car = .{ .char = s[i] }, .cdr = result };
+        result = .{ .pair = p };
+    }
+    return result;
+}
+
+fn listToString(arena: std.mem.Allocator, args: []const Value) PrimitiveError!Value {
+    try exactly(args, 1);
+    var chars: std.ArrayList(u8) = .empty;
+    defer chars.deinit(arena);
+    var rest = args[0];
+    var fast = args[0];
+    while (rest == .pair) {
+        try chars.append(arena, try asChar(rest.pair.car));
+        rest = rest.pair.cdr;
+        if (fast == .pair) fast = fast.pair.cdr;
+        if (fast == .pair) fast = fast.pair.cdr;
+        if (rest == .pair and fast == .pair and rest.pair == fast.pair) return error.TypeError;
+    }
+    if (rest != .empty_list) return error.TypeError;
+    return .{ .string = try chars.toOwnedSlice(arena) };
+}
+
+fn strChain(args: []const Value, comptime op: Cmp, comptime fold: bool) PrimitiveError!Value {
+    if (args.len < 2) return error.ArityMismatch;
+    var prev = try asString(args[0]);
+    for (args[1..]) |a| {
+        const cur = try asString(a);
+        const order = if (fold) foldedOrder(prev, cur) else std.mem.order(u8, prev, cur);
+        const good = switch (op) {
+            .eq => order == .eq,
+            .lt => order == .lt,
+            .gt => order == .gt,
+            .le => order != .gt,
+            .ge => order != .lt,
+        };
+        if (!good) return .{ .boolean = false };
+        prev = cur;
+    }
+    return .{ .boolean = true };
+}
+
+fn foldedOrder(a: []const u8, b: []const u8) std.math.Order {
+    const n = @min(a.len, b.len);
+    for (0..n) |i| {
+        const x = std.ascii.toLower(a[i]);
+        const y = std.ascii.toLower(b[i]);
+        if (x != y) return if (x < y) .lt else .gt;
+    }
+    return std.math.order(a.len, b.len);
+}
+
+fn strEq(_: std.mem.Allocator, args: []const Value) PrimitiveError!Value {
+    return strChain(args, .eq, false);
+}
+fn strLt(_: std.mem.Allocator, args: []const Value) PrimitiveError!Value {
+    return strChain(args, .lt, false);
+}
+fn strGt(_: std.mem.Allocator, args: []const Value) PrimitiveError!Value {
+    return strChain(args, .gt, false);
+}
+fn strLe(_: std.mem.Allocator, args: []const Value) PrimitiveError!Value {
+    return strChain(args, .le, false);
+}
+fn strGe(_: std.mem.Allocator, args: []const Value) PrimitiveError!Value {
+    return strChain(args, .ge, false);
+}
+fn strCiEq(_: std.mem.Allocator, args: []const Value) PrimitiveError!Value {
+    return strChain(args, .eq, true);
+}
 
 fn asChar(v: Value) PrimitiveError!u8 {
     return if (v == .char) v.char else error.TypeError;
