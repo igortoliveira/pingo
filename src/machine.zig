@@ -277,6 +277,10 @@ pub const Machine = struct {
                     if (check != .empty_list) return Error.BadSyntax;
                     return m.enterSequence(p.cdr, x.env);
                 }
+                if (isForm(p, "quasiquote"))
+                    return .{ .expr = .{ .d = try expand.expandQuasiquote(m.arena, p.cdr), .env = x.env } };
+                if (isForm(p, "unquote") or isForm(p, "unquote-splicing"))
+                    return Error.BadSyntax; // only meaningful inside quasiquote
                 if (isForm(p, "set!")) {
                     const a = p.cdr;
                     if (a != .pair or a.pair.car != .symbol) return Error.BadSyntax;
@@ -1276,6 +1280,16 @@ test "differential: machine and oracle agree on a form corpus" {
         "(list->vector '(1 2))",
         "(define fv (make-vector 2 0)) (vector-fill! fv 9) fv",
         "(define sv #(1 2)) (vector-set! sv 0 99) sv",
+        // quasiquote (8G.2)
+        "`(1 ,(+ 1 1) 3)",
+        "(define qx 5) `(qx ,qx)",
+        "`(a ,@(list 1 2) b)",
+        "`(1 . ,(+ 1 1))",
+        "`#(1 ,(+ 1 1))",
+        "`(a `(b ,(c ,(+ 1 2))))",
+        "(let ((cons 'shadowed)) `(1 ,(+ 1 1)))",
+        "(unquote 1)",
+        "`(,@5)",
         // cond/and/or (7.3): short-circuit means untaken positions may be unbound
         "(cond (#f 1) ((eq? 1 1) 'hit) (else 'miss))",
         "(cond (#f 1))",

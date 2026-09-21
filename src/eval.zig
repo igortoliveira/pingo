@@ -188,6 +188,12 @@ pub const Evaluator = struct {
                         }
                         return .unspecified;
                     }
+                    if (isForm(p, "quasiquote")) {
+                        d = try expand.expandQuasiquote(e.arena, p.cdr);
+                        continue;
+                    }
+                    if (isForm(p, "unquote") or isForm(p, "unquote-splicing"))
+                        return Error.BadSyntax; // only meaningful inside quasiquote
                     if (isForm(p, "set!")) {
                         const a = p.cdr;
                         if (a != .pair or a.pair.car != .symbol) return Error.BadSyntax;

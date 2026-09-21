@@ -67,7 +67,7 @@ pub fn main(init: std.process.Init) !void {
     if (fail > 0) std.process.exit(1);
     // Regression floor: raise this whenever new features convert skips to
     // passes; a drop means a feature silently stopped being recognized.
-    const pass_floor = 166;
+    const pass_floor = 173;
     if (pass < pass_floor) {
         std.debug.print("conformance: pass count {d} fell below the floor {d}\n", .{ pass, pass_floor });
         std.process.exit(1);
@@ -145,6 +145,9 @@ fn check(
         },
         .pair => |p| {
             if (p.car == .symbol and std.mem.eql(u8, p.car.symbol, "quote")) return true;
+            if (p.car == .symbol and std.mem.eql(u8, p.car.symbol, "quasiquote") and
+                p.cdr == .pair and p.cdr.pair.cdr == .empty_list)
+                return checkTemplate(arena, p.cdr.pair.car, 1, evaluator, bound);
             if (p.car == .symbol and std.mem.eql(u8, p.car.symbol, "case") and p.cdr == .pair) {
                 if (!try check(arena, p.cdr.pair.car, evaluator, bound)) return false;
                 var clauses = p.cdr.pair.cdr;
@@ -276,6 +279,38 @@ fn check(
             return true;
         },
         .vector => return true, // vector literals are data
+        else => return true,
+    }
+}
+
+/// Quasiquote templates are data except where unquotes re-enter code.
+fn checkTemplate(
+    arena: std.mem.Allocator,
+    t: Datum,
+    depth: usize,
+    evaluator: *pingo.machine.Machine,
+    bound: *std.ArrayList([]const u8),
+) std.mem.Allocator.Error!bool {
+    switch (t) {
+        .pair => |p| {
+            if (p.car == .symbol and (std.mem.eql(u8, p.car.symbol, "unquote") or
+                std.mem.eql(u8, p.car.symbol, "unquote-splicing")) and
+                p.cdr == .pair and p.cdr.pair.cdr == .empty_list)
+            {
+                if (depth == 1) return check(arena, p.cdr.pair.car, evaluator, bound);
+                return checkTemplate(arena, p.cdr.pair.car, depth - 1, evaluator, bound);
+            }
+            if (p.car == .symbol and std.mem.eql(u8, p.car.symbol, "quasiquote") and
+                p.cdr == .pair and p.cdr.pair.cdr == .empty_list)
+                return checkTemplate(arena, p.cdr.pair.car, depth + 1, evaluator, bound);
+            if (!try checkTemplate(arena, p.car, depth, evaluator, bound)) return false;
+            return checkTemplate(arena, p.cdr, depth, evaluator, bound);
+        },
+        .vector => |items| {
+            for (items) |item|
+                if (!try checkTemplate(arena, item, depth, evaluator, bound)) return false;
+            return true;
+        },
         else => return true,
     }
 }

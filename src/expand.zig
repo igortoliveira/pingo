@@ -161,8 +161,8 @@ pub fn expandCase(arena: std.mem.Allocator, form: Datum) Error!Datum {
         try tests.append(arena, try datum_mod.symbol(arena, "or"));
         var datums = clause.pair.car;
         while (datums == .pair) : (datums = datums.pair.cdr) {
-            const quoted = try listOf(arena, &.{ try datum_mod.symbol(arena, "quote"), datums.pair.car });
-            try tests.append(arena, try listOf(arena, &.{ try datum_mod.symbol(arena, "eqv?"), tmp, quoted }));
+            const quoted_datum = try quoted(arena, datums.pair.car);
+            try tests.append(arena, try listOf(arena, &.{ try datum_mod.symbol(arena, "eqv?"), tmp, quoted_datum }));
         }
         if (datums != .empty_list) return error.BadSyntax;
         try cond_clauses.append(
@@ -179,6 +179,92 @@ pub fn expandCase(arena: std.mem.Allocator, form: Datum) Error!Datum {
     );
     const binding = try listOf(arena, &.{try listOf(arena, &.{ tmp, key })});
     return try listOf(arena, &.{ try datum_mod.symbol(arena, "let"), binding, cond_form });
+}
+
+/// `(quasiquote t)` per R5RS (§2 "Quasiquote"): the template becomes
+/// construction code over the shadow-proof prelude aliases %qq-cons,
+/// %qq-append, %qq-list and %qq-list->vector. Nested quasiquotes adjust
+/// depth; unquotes fire at depth 1.
+pub fn expandQuasiquote(arena: std.mem.Allocator, form: Datum) Error!Datum {
+    if (form != .pair or form.pair.cdr != .empty_list) return error.BadSyntax;
+    return qq(arena, form.pair.car, 1);
+}
+
+fn headIs(t: Datum, name: []const u8) bool {
+    return t == .pair and t.pair.car == .symbol and
+        std.mem.eql(u8, t.pair.car.symbol, name);
+}
+
+/// Validates `(head e)` shape and returns `e`.
+fn soleArg(t: Datum) Error!Datum {
+    const rest = t.pair.cdr;
+    if (rest != .pair or rest.pair.cdr != .empty_list) return error.BadSyntax;
+    return rest.pair.car;
+}
+
+fn quoted(arena: std.mem.Allocator, d: Datum) Error!Datum {
+    return listOf(arena, &.{ try datum_mod.symbol(arena, "quote"), d });
+}
+
+fn qq(arena: std.mem.Allocator, t: Datum, depth: usize) Error!Datum {
+    switch (t) {
+        .pair => |p| {
+            if (headIs(t, "unquote")) {
+                const e = try soleArg(t);
+                if (depth == 1) return e;
+                return listOf(arena, &.{
+                    try datum_mod.symbol(arena, "%qq-list"),
+                    try quoted(arena, try datum_mod.symbol(arena, "unquote")),
+                    try qq(arena, e, depth - 1),
+                });
+            }
+            if (headIs(t, "quasiquote")) {
+                const e = try soleArg(t);
+                return listOf(arena, &.{
+                    try datum_mod.symbol(arena, "%qq-list"),
+                    try quoted(arena, try datum_mod.symbol(arena, "quasiquote")),
+                    try qq(arena, e, depth + 1),
+                });
+            }
+            if (headIs(p.car, "unquote-splicing")) {
+                const e = try soleArg(p.car);
+                if (depth == 1) return listOf(arena, &.{
+                    try datum_mod.symbol(arena, "%qq-append"),
+                    e,
+                    try qq(arena, p.cdr, depth),
+                });
+                const rebuilt = try listOf(arena, &.{
+                    try datum_mod.symbol(arena, "%qq-list"),
+                    try quoted(arena, try datum_mod.symbol(arena, "unquote-splicing")),
+                    try qq(arena, e, depth - 1),
+                });
+                return listOf(arena, &.{
+                    try datum_mod.symbol(arena, "%qq-cons"),
+                    rebuilt,
+                    try qq(arena, p.cdr, depth),
+                });
+            }
+            return listOf(arena, &.{
+                try datum_mod.symbol(arena, "%qq-cons"),
+                try qq(arena, p.car, depth),
+                try qq(arena, p.cdr, depth),
+            });
+        },
+        .vector => |items| {
+            // treat elements as a list template, then convert
+            var as_list: Datum = .empty_list;
+            var i = items.len;
+            while (i > 0) {
+                i -= 1;
+                as_list = try datum_mod.cons(arena, items[i], as_list);
+            }
+            return listOf(arena, &.{
+                try datum_mod.symbol(arena, "%qq-list->vector"),
+                try qq(arena, as_list, depth),
+            });
+        },
+        else => return quoted(arena, t),
+    }
 }
 
 /// Copies proper list `xs` with `last` appended as the final element.
@@ -404,6 +490,20 @@ test "case expands to let + cond over eqv?" {
 test "let* expands to nested lets" {
     try expectExpansion(expandLetStar, "(let* ((x 1) (y x)) y)", "(let ((x 1)) (let* ((y x)) y))");
     try expectExpansion(expandLetStar, "(let* () 5)", "(let () 5)");
+}
+
+test "quasiquote expansions" {
+    try expectExpansion(expandQuasiquote, "`(a ,b)", "(%qq-cons (quote a) (%qq-cons b (quote ())))");
+    try expectExpansion(expandQuasiquote, "`(,@xs b)", "(%qq-append xs (%qq-cons (quote b) (quote ())))");
+    try expectExpansion(expandQuasiquote, "`(1 . ,b)", "(%qq-cons (quote 1) b)");
+    try expectExpansion(expandQuasiquote, "`,x", "x");
+    try expectExpansion(expandQuasiquote, "`#(,x)", "(%qq-list->vector (%qq-cons x (quote ())))");
+    // nested: inner unquote survives one level
+    try expectExpansion(
+        expandQuasiquote,
+        "``,x",
+        "(%qq-list (quote quasiquote) (%qq-list (quote unquote) (quote x)))",
+    );
 }
 
 test "cond, and, or expansions" {

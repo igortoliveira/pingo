@@ -5,6 +5,13 @@
 ; Written in Scheme on purpose: procedures built on cons/list compose with
 ; pending values (non-strict cons), which a strict Zig primitive would break.
 
+; Shadow-proof aliases used by quasiquote expansion (§2): rebinding cons or
+; append must not corrupt template construction.
+(define %qq-cons cons)
+(define %qq-append append)
+(define %qq-list list)
+(define %qq-list->vector list->vector)
+
 (define (caar p) (car (car p)))
 (define (cadr p) (car (cdr p)))
 (define (cdar p) (cdr (car p)))
