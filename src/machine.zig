@@ -1058,6 +1058,82 @@ test "machine: call/cc capture and invoke (machine-only; oracle Unimplemented)" 
     try std.testing.expectError(error.Unimplemented, ts.run("(call/cc (lambda (k) 1))"));
 }
 
+const CountHost = struct {
+    calls: usize = 0,
+    fn handle(ctx: *anyopaque, _: std.mem.Allocator, _: []const Value) capability_mod.HostError!Value {
+        const h: *CountHost = @ptrCast(@alignCast(ctx));
+        h.calls += 1;
+        return .{ .integer = 7 };
+    }
+};
+
+test "machine: call/cc escape leaves the dispatched call observed (§6)" {
+    var t = TestMachine.init();
+    defer t.deinit();
+    _ = try t.run("1");
+    const arena = t.arena_state.allocator();
+    const m = &t.machine.?;
+    var dummy: u8 = 0;
+    const cap = capability_mod.Capability{ .name = "ask", .class = .external_independent, .ctx = &dummy, .handler = nopHandler };
+    try capability_mod.register(m.global, &cap);
+
+    // ask dispatches (eager continue), then (k 99) escapes the surrounding +.
+    const outcome = try m.evalToplevel(try readOne(arena, "(call/cc (lambda (k) (+ (ask 1) (k 99))))"));
+    try std.testing.expect(outcome == .blocked); // the dispatch stands (§6)
+    try std.testing.expectEqual(@as(usize, 1), m.outstanding().len);
+    m.resolve(m.outstanding()[0], .{ .integer = 5 });
+    const done = try m.continueRun();
+    try std.testing.expectEqual(@as(i64, 99), done.value.integer); // + was abandoned
+}
+
+test "machine: re-entering a continuation re-dispatches its calls" {
+    var t = TestMachine.init();
+    defer t.deinit();
+    _ = try t.run("1");
+    const m = &t.machine.?;
+    var host = CountHost{};
+    const cap = capability_mod.Capability{ .name = "ask", .class = .external_independent, .ctx = &host, .handler = CountHost.handle };
+    try capability_mod.register(m.global, &cap);
+
+    // k is captured before the ask; invoked once, so ask runs twice.
+    _ = try t.run(
+        \\(let ((k #f) (done #f))
+        \\  (let ((x (call/cc (lambda (c) (set! k c) 0))))
+        \\    (ask 1)
+        \\    (if done 'end (begin (set! done #t) (k 1)))))
+    );
+    try std.testing.expectEqual(@as(usize, 2), host.calls);
+}
+
+test "machine: continuation program agrees under reverse completion order" {
+    const arena_backing = std.testing.allocator;
+    const src = "(call/cc (lambda (k) (+ 1 (k (+ (ask 1) (ask 2))))))";
+
+    // Resolve outstanding calls in-order vs reverse; the escape discards the
+    // sum, but both asks are dispatched and the outcome must not depend on
+    // completion order (§6).
+    for ([_]bool{ false, true }) |reverse| {
+        var arena_state = std.heap.ArenaAllocator.init(arena_backing);
+        defer arena_state.deinit();
+        const arena = arena_state.allocator();
+        var m = try Machine.init(arena, .{ .fuel = 1_000_000, .call_depth = 500 });
+        var dummy: u8 = 0;
+        const cap = capability_mod.Capability{ .name = "ask", .class = .external_independent, .ctx = &dummy, .handler = nopHandler };
+        try capability_mod.register(m.global, &cap);
+
+        var outcome = try m.evalToplevel(try readOne(arena, src));
+        while (outcome == .blocked) {
+            const calls = m.outstanding();
+            const pick = if (reverse) calls[calls.len - 1] else calls[0];
+            m.resolve(pick, .{ .integer = 3 });
+            outcome = try m.continueRun();
+        }
+        // (k ...) escapes the (+ 1 _); the continuation is the toplevel, so
+        // the feed's value is the sum 3 + 3 = 6.
+        try std.testing.expectEqual(@as(i64, 6), outcome.value.integer);
+    }
+}
+
 test "machine: dynamic-wind unwinds and rewinds across a re-entered continuation" {
     var t = TestMachine.init();
     defer t.deinit();
