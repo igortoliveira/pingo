@@ -319,6 +319,15 @@ pub const Evaluator = struct {
             },
             .primitive => |p| {
                 if (p == &primitives.callcc_primitive) return Error.Unimplemented;
+                if (p == &primitives.dynamic_wind_primitive) {
+                    // No call/cc in the oracle, so no control transfer can
+                    // cross the extent: plain sequencing is exact (§2).
+                    if (args.len != 3) return Error.ArityMismatch;
+                    _ = try e.apply(args[0], &.{});
+                    const result = try e.apply(args[1], &.{});
+                    _ = try e.apply(args[2], &.{});
+                    return result;
+                }
                 if (p == &primitives.apply_primitive) {
                     // (apply f a ... args): spread the final list.
                     if (args.len < 2) return Error.ArityMismatch;

@@ -73,11 +73,26 @@ const Frame = union(enum) {
     /// Native letrec (§2 Derived forms II): rebind names[index] to the
     /// arriving value, then evaluate the next init or enter the body.
     letrec: struct { b: expand.Bindings, index: usize, env: *Env, body: Datum },
+    /// dynamic-wind (§2, tier 8H″): `before` has run; activate the wind entry
+    /// and run `thunk`.
+    dw_before: struct { before: Value, thunk: Value, after: Value },
+    /// dynamic-wind: `thunk` returned; deactivate `entry` and run `after`.
+    dw_thunk: struct { entry: *WindEntry, after: Value },
+    /// dynamic-wind: `after` has run; return the thunk's saved `result`.
+    dw_after: struct { result: Value },
+    /// Continuation invoke: run the pending winder `thunks` in order, then
+    /// install `target`'s frames/wind and deliver `value` (docs/callcc.md).
+    winders: struct { thunks: []Value, index: usize, target: *const Snapshot, value: Value },
 };
+
+/// One active `dynamic-wind` extent: its before/after thunks, re-run on
+/// continuation entry/exit. Identity (pointer) marks the extent, so a
+/// snapshot and the live stack share entries and compare by pointer.
+const WindEntry = struct { before: Value, after: Value };
 
 /// A captured continuation (tier 8H″): a clone of the frame stack at the
 /// `call/cc` call site. `Value.continuation` points here (opaquely).
-const Snapshot = struct { frames: []Frame };
+const Snapshot = struct { frames: []Frame, wind: []*WindEntry };
 
 /// Deep-copies the frame stack for a continuation snapshot. Frames hold
 /// immutable data (`Datum`, `Env`, slices, `Bindings`) which is shared;
@@ -121,6 +136,10 @@ pub const Machine = struct {
     /// Calls parked on pending arguments (§4 "Parked calls"): dispatched
     /// automatically once their blockers settle.
     parked_calls: std.ArrayList(Parked) = .empty,
+    /// Active `dynamic-wind` extents, outermost first (tier 8H″). A
+    /// continuation snapshots this alongside the frames; invoking one runs
+    /// the afters/befores that differ from the live stack.
+    wind: std.ArrayList(*WindEntry) = .empty,
 
     pub fn init(arena: std.mem.Allocator, limits: Limits) std.mem.Allocator.Error!Machine {
         const global = try Env.init(arena, null);
@@ -168,6 +187,9 @@ pub const Machine = struct {
         m.outstanding_calls.clearRetainingCapacity();
         m.feed_calls.clearRetainingCapacity();
         m.parked_calls.clearRetainingCapacity();
+        // dynamic-wind extents do not cross toplevel forms; a prior feed that
+        // aborted mid-extent may have left the wind stack dirty (§2).
+        m.wind.clearRetainingCapacity();
         m.diagnostic = null;
         if (d == .pair and isForm(d.pair, "define")) {
             const parts = try expand.defineParts(m.arena, d.pair.cdr);
@@ -498,7 +520,60 @@ pub const Machine = struct {
                 try m.pushFrame(.{ .body = .{ .rest = b.rest[1..], .env = b.env } });
                 return .{ .expr = .{ .d = b.rest[0], .env = b.env } };
             },
+            .dw_before => |d| {
+                // `before` returned (value ignored): activate the extent and
+                // run `thunk`.
+                const entry = try m.arena.create(WindEntry);
+                entry.* = .{ .before = d.before, .after = d.after };
+                try m.wind.append(m.arena, entry);
+                try m.pushFrame(.{ .dw_thunk = .{ .entry = entry, .after = d.after } });
+                return m.callThunk(d.thunk);
+            },
+            .dw_thunk => |d| {
+                // `thunk` returned `v`: deactivate the extent and run `after`,
+                // saving `v` for the return.
+                std.debug.assert(m.wind.items.len > 0 and m.wind.items[m.wind.items.len - 1] == d.entry);
+                _ = m.wind.pop();
+                try m.pushFrame(.{ .dw_after = .{ .result = v } });
+                return m.callThunk(d.after);
+            },
+            .dw_after => |d| return .{ .value = d.result }, // `after` done; return thunk's value
+            .winders => |w| {
+                if (w.index < w.thunks.len) {
+                    try m.pushFrame(.{ .winders = .{
+                        .thunks = w.thunks,
+                        .index = w.index + 1,
+                        .target = w.target,
+                        .value = w.value,
+                    } });
+                    return m.callThunk(w.thunks[w.index]);
+                }
+                // All winders run: install the captured control (fresh clone)
+                // and deliver the value to the continuation.
+                m.frames.clearRetainingCapacity();
+                try m.frames.appendSlice(m.arena, try cloneFrames(m.arena, w.target.frames));
+                m.wind.clearRetainingCapacity();
+                try m.wind.appendSlice(m.arena, w.target.wind);
+                return .{ .value = w.value };
+            },
         }
+    }
+
+    /// Applies a zero-argument thunk through the ordinary application path.
+    fn callThunk(m: *Machine, thunk: Value) Error!Control {
+        var c: std.ArrayList(Value) = .empty;
+        try c.append(m.arena, thunk);
+        return m.applyCollected(c);
+    }
+
+    /// `(dynamic-wind before thunk after)` (§2, tier 8H″): run `before`, then
+    /// via frames activate the wind extent, run `thunk`, deactivate, run
+    /// `after`, and return the thunk's value.
+    fn enterDynamicWind(m: *Machine, collected: std.ArrayList(Value)) Error!Control {
+        const items = collected.items;
+        if (items.len != 4) return Error.ArityMismatch; // dynamic-wind + 3
+        try m.pushFrame(.{ .dw_before = .{ .before = items[1], .thunk = items[2], .after = items[3] } });
+        return m.callThunk(items[1]);
     }
 
     fn applyCollected(m: *Machine, collected: std.ArrayList(Value)) Error!Control {
@@ -523,6 +598,8 @@ pub const Machine = struct {
             .primitive => |prim| {
                 if (prim == &primitives.callcc_primitive)
                     return m.captureContinuation(collected);
+                if (prim == &primitives.dynamic_wind_primitive)
+                    return m.enterDynamicWind(collected);
                 if (prim == &primitives.apply_primitive)
                     return m.applySpread(collected);
                 if (prim.strict_args) for (args, 0..) |a, i| {
@@ -601,12 +678,29 @@ pub const Machine = struct {
                     return Error.LimitExceeded;
                 }
                 try m.chargeFuelN(snap.frames.len);
-                // Fresh clone on invoke, not just capture: multi-shot safety —
-                // the live stack mutates its collected buffers, the snapshot
-                // must not (docs/callcc.md).
+                // dynamic-wind (§2): run the afters of the extents being left
+                // and the befores of the extents being entered, relative to
+                // the common prefix of the live and captured wind stacks.
+                var cp: usize = 0;
+                while (cp < m.wind.items.len and cp < snap.wind.len and
+                    m.wind.items[cp] == snap.wind[cp]) : (cp += 1)
+                {}
+                var thunks: std.ArrayList(Value) = .empty;
+                var i = m.wind.items.len;
+                while (i > cp) : (i -= 1) // afters, innermost first
+                    try thunks.append(m.arena, m.wind.items[i - 1].after);
+                for (snap.wind[cp..]) |e| // befores, outermost first
+                    try thunks.append(m.arena, e.before);
+                // The winders frame runs those thunks in order, then installs
+                // the captured control (a fresh clone — multi-shot safety).
                 m.frames.clearRetainingCapacity();
-                try m.frames.appendSlice(m.arena, try cloneFrames(m.arena, snap.frames));
-                return .{ .value = args[0] };
+                try m.frames.append(m.arena, .{ .winders = .{
+                    .thunks = try thunks.toOwnedSlice(m.arena),
+                    .index = 0,
+                    .target = snap,
+                    .value = args[0],
+                } });
+                return .{ .value = .unspecified };
             },
             else => return Error.NotAProcedure,
         }
@@ -620,7 +714,10 @@ pub const Machine = struct {
         if (items.len != 2) return Error.ArityMismatch; // call/cc + one proc
         try m.chargeFuelN(m.frames.items.len);
         const snap = try m.arena.create(Snapshot);
-        snap.* = .{ .frames = try cloneFrames(m.arena, m.frames.items) };
+        snap.* = .{
+            .frames = try cloneFrames(m.arena, m.frames.items),
+            .wind = try m.arena.dupe(*WindEntry, m.wind.items),
+        };
         const k: Value = .{ .continuation = @ptrCast(snap) };
 
         var reapply: std.ArrayList(Value) = .empty;
@@ -959,6 +1056,26 @@ test "machine: call/cc capture and invoke (machine-only; oracle Unimplemented)" 
     var ts = eval_mod.TestSession.init();
     defer ts.deinit();
     try std.testing.expectError(error.Unimplemented, ts.run("(call/cc (lambda (k) 1))"));
+}
+
+test "machine: dynamic-wind unwinds and rewinds across a re-entered continuation" {
+    var t = TestMachine.init();
+    defer t.deinit();
+    // Re-entering the continuation captured inside the thunk re-runs `before`
+    // (connect) on entry and `after` (disconnect) on exit (R5RS, docs/callcc.md).
+    const v = try t.run(
+        \\(let ((path '()) (c #f))
+        \\  (let ((add (lambda (s) (set! path (cons s path)))))
+        \\    (dynamic-wind
+        \\      (lambda () (add 'connect))
+        \\      (lambda () (add (call/cc (lambda (c0) (set! c c0) 'talk1))))
+        \\      (lambda () (add 'disconnect)))
+        \\    (if (< (length path) 4) (c 'talk2) (reverse path))))
+    );
+    var out = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer out.deinit();
+    try printer_mod.writeValue(v, &out.writer);
+    try std.testing.expectEqualStrings("(connect talk1 disconnect connect talk2 disconnect)", out.written());
 }
 
 test "machine: tail calls keep the frame stack flat" {
@@ -1447,7 +1564,9 @@ test "differential: machine and oracle agree on a form corpus" {
         "(call-with-values (lambda () (values)) (lambda () 'none))",
         "(call-with-values (lambda () 5) (lambda (x) (* x 2)))",
         "(call-with-values (lambda () (values 1 2)) (lambda (x) x))",
-        // dynamic-wind (8H'.6): plain sequencing pre-call/cc
+        // dynamic-wind (8H'.6 / native 8H''.3): order, value, arity. The
+        // continuation re-entry case is machine-only (oracle has no call/cc)
+        // and lives in a dedicated test.
         "(define order '()) (define (add s) (set! order (cons s order))) (dynamic-wind (lambda () (add 'a)) (lambda () (add 'b) 'r) (lambda () (add 'c))) (reverse order)",
         "(dynamic-wind (lambda () 1) (lambda () 2) (lambda () 3))",
         "(dynamic-wind (lambda () 1) (lambda () 2))",

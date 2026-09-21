@@ -13,6 +13,7 @@ pub fn install(scope: *env_mod.Env) std.mem.Allocator.Error!void {
     for (&table) |*p| try scope.define(p.name, .{ .primitive = p });
     try scope.define(apply_primitive.name, .{ .primitive = &apply_primitive });
     try scope.define(callcc_primitive.name, .{ .primitive = &callcc_primitive });
+    try scope.define(dynamic_wind_primitive.name, .{ .primitive = &dynamic_wind_primitive });
 }
 
 /// `call/cc` is engine-level like `apply`: a primitive cannot capture the
@@ -25,6 +26,20 @@ pub const callcc_primitive = Value.Primitive{
 };
 
 fn callccStub(_: std.mem.Allocator, _: []const Value) PrimitiveError!Value {
+    return error.TypeError;
+}
+
+/// `dynamic-wind` is engine-level once continuations exist (tier 8H″): the
+/// machine intercepts this sentinel to run before/thunk/after with a wind
+/// stack that unwinds and rewinds on continuation transfer. The oracle has
+/// no call/cc, so it never needs winding; its stub errors.
+pub const dynamic_wind_primitive = Value.Primitive{
+    .name = "dynamic-wind",
+    .func = dynamicWindStub,
+    .strict_args = false,
+};
+
+fn dynamicWindStub(_: std.mem.Allocator, _: []const Value) PrimitiveError!Value {
     return error.TypeError;
 }
 
