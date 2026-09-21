@@ -317,6 +317,32 @@ test "primitives are first-class values" {
     try std.testing.expectEqual(@as(i64, 5), (try s.run("(apply2 + 2 3)")).integer);
 }
 
+test "list primitives" {
+    var s = TestSession.init();
+    defer s.deinit();
+    const v = try s.run("(cons 1 '(2))");
+    try std.testing.expectEqual(@as(i64, 1), v.pair.car.integer);
+    try std.testing.expectEqual(@as(i64, 2), v.pair.cdr.pair.car.integer);
+
+    try std.testing.expectEqual(@as(i64, 1), (try s.run("(car '(1 2))")).integer);
+    try std.testing.expectEqual(@as(i64, 2), (try s.run("(car (cdr '(1 2)))")).integer);
+    try std.testing.expectEqual(true, (try s.run("(null? '())")).boolean);
+    try std.testing.expectEqual(false, (try s.run("(null? '(1))")).boolean);
+    try std.testing.expectEqual(true, (try s.run("(pair? '(1))")).boolean);
+    try std.testing.expectEqual(false, (try s.run("(pair? '())")).boolean);
+    // improper pair via cons
+    try std.testing.expectEqual(@as(i64, 2), (try s.run("(cdr (cons 1 2))")).integer);
+}
+
+test "list primitive errors" {
+    var s = TestSession.init();
+    defer s.deinit();
+    try std.testing.expectError(error.TypeError, s.run("(car '())"));
+    try std.testing.expectError(error.TypeError, s.run("(cdr 5)"));
+    try std.testing.expectError(error.ArityMismatch, s.run("(cons 1)"));
+    try std.testing.expectError(error.ArityMismatch, s.run("(null?)"));
+}
+
 test "define binds, returns unspecified, and persists" {
     var s = TestSession.init();
     defer s.deinit();

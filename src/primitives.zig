@@ -18,7 +18,16 @@ const table = [_]Value.Primitive{
     .{ .name = "-", .func = sub },
     .{ .name = "*", .func = mul },
     .{ .name = "/", .func = div },
+    .{ .name = "cons", .func = cons },
+    .{ .name = "car", .func = car },
+    .{ .name = "cdr", .func = cdr },
+    .{ .name = "null?", .func = isNull },
+    .{ .name = "pair?", .func = isPair },
 };
+
+fn exactly(args: []const Value, n: usize) PrimitiveError!void {
+    if (args.len != n) return error.ArityMismatch;
+}
 
 fn asInt(v: Value) PrimitiveError!i64 {
     return switch (v) {
@@ -46,6 +55,33 @@ fn mul(_: std.mem.Allocator, args: []const Value) PrimitiveError!Value {
     var acc: i64 = 1;
     for (args) |a| acc = std.math.mul(i64, acc, try asInt(a)) catch return error.IntegerOverflow;
     return .{ .integer = acc };
+}
+
+fn cons(arena: std.mem.Allocator, args: []const Value) PrimitiveError!Value {
+    try exactly(args, 2);
+    const p = try arena.create(Value.Pair);
+    p.* = .{ .car = args[0], .cdr = args[1] };
+    return .{ .pair = p };
+}
+
+fn car(_: std.mem.Allocator, args: []const Value) PrimitiveError!Value {
+    try exactly(args, 1);
+    return if (args[0] == .pair) args[0].pair.car else error.TypeError;
+}
+
+fn cdr(_: std.mem.Allocator, args: []const Value) PrimitiveError!Value {
+    try exactly(args, 1);
+    return if (args[0] == .pair) args[0].pair.cdr else error.TypeError;
+}
+
+fn isNull(_: std.mem.Allocator, args: []const Value) PrimitiveError!Value {
+    try exactly(args, 1);
+    return .{ .boolean = args[0] == .empty_list };
+}
+
+fn isPair(_: std.mem.Allocator, args: []const Value) PrimitiveError!Value {
+    try exactly(args, 1);
+    return .{ .boolean = args[0] == .pair };
 }
 
 /// v0 `/` is truncating integer division (only integers exist, §1).
