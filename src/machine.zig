@@ -430,6 +430,59 @@ test "machine: capability dispatch with §4 boundary checks" {
     try std.testing.expectEqualStrings("double", t.machine.?.diagnostic.?.context);
 }
 
+test "differential: machine and oracle agree on a form corpus" {
+    const corpus = [_][]const u8{
+        "42",
+        "'(1 (2 #t) \"s\" ())",
+        "(+ 1 (* 2 3) (- 10 4 3) (/ 9 2))",
+        "(if (eq? (car '(1 2)) 1) 'yes 'no)",
+        "(begin 1 2 (if #f 3) 4)",
+        "(define f (lambda (x) (lambda (y) (+ x y)))) ((f 1) 2)",
+        "(define fact (lambda (n) (if (eq? n 0) 1 (* n (fact (- n 1)))))) (fact 12)",
+        "(define loop (lambda (n) (if (eq? n 0) 'done (loop (- n 1))))) (loop 5000)",
+        "(cons (null? '()) (pair? (cons 1 2)))",
+        "((lambda (f a b) (f a b)) + 20 22)",
+        // error cases — both engines must fail with the same error
+        "()",
+        "nope",
+        "(1 2)",
+        "((lambda (x) x))",
+        "(/ 1 0)",
+        "(+ 1 #t)",
+        "(car '())",
+        "(quote 1 2)",
+        "(if #t)",
+        "(lambda (x x) x)",
+        "(define y (define z 1))",
+        "(+ 9223372036854775807 1)",
+    };
+
+    for (corpus) |src| {
+        var tm = TestMachine.init();
+        defer tm.deinit();
+        var ts = eval_mod.TestSession.init();
+        defer ts.deinit();
+
+        const machine_result = tm.run(src);
+        const oracle_result = ts.run(src);
+
+        if (oracle_result) |oracle_value| {
+            const machine_value = try machine_result;
+            var a = std.Io.Writer.Allocating.init(std.testing.allocator);
+            defer a.deinit();
+            var b = std.Io.Writer.Allocating.init(std.testing.allocator);
+            defer b.deinit();
+            try printer_mod.writeValue(machine_value, &a.writer);
+            try printer_mod.writeValue(oracle_value, &b.writer);
+            try std.testing.expectEqualStrings(b.written(), a.written());
+        } else |oracle_err| {
+            try std.testing.expectError(oracle_err, machine_result);
+        }
+    }
+}
+
+const printer_mod = @import("printer.zig");
+
 test "machine: syntax errors and fuel" {
     var t = TestMachine.init();
     defer t.deinit();

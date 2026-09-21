@@ -23,7 +23,7 @@ pub fn main(init: std.process.Init) !void {
     var arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
-    var evaluator = try pingo.eval.Evaluator.init(arena, .{
+    var evaluator = try pingo.machine.Machine.init(arena, .{
         .fuel = 100_000_000,
         .call_depth = 1_000,
     });
@@ -118,7 +118,7 @@ fn parseTestForm(arena: std.mem.Allocator, src: []const u8) ?TestForm {
 
 /// True iff every free symbol outside quote resolves to a global binding, a
 /// special form, or a lambda parameter in scope.
-fn allSymbolsSupported(arena: std.mem.Allocator, d: Datum, evaluator: *pingo.eval.Evaluator) bool {
+fn allSymbolsSupported(arena: std.mem.Allocator, d: Datum, evaluator: *pingo.machine.Machine) bool {
     var bound: std.ArrayList([]const u8) = .empty;
     defer bound.deinit(arena);
     return check(arena, d, evaluator, &bound) catch false;
@@ -127,7 +127,7 @@ fn allSymbolsSupported(arena: std.mem.Allocator, d: Datum, evaluator: *pingo.eva
 fn check(
     arena: std.mem.Allocator,
     d: Datum,
-    evaluator: *pingo.eval.Evaluator,
+    evaluator: *pingo.machine.Machine,
     bound: *std.ArrayList([]const u8),
 ) std.mem.Allocator.Error!bool {
     switch (d) {

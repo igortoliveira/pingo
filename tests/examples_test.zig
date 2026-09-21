@@ -39,7 +39,7 @@ fn runProgram(src: []const u8, host: *StubHost, caps: []pingo.capability.Capabil
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
-    var evaluator = try pingo.eval.Evaluator.init(arena, .{
+    var evaluator = try pingo.machine.Machine.init(arena, .{
         .fuel = 1_000_000,
         .call_depth = 500,
     });
