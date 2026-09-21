@@ -25,4 +25,8 @@ zig build
 Tool classes: `pure | independent | resource | ordered | irreversible` (§4 of
 the semantics); latency is virtual — nothing actually sleeps.
 
+Add `--record run.trace` to save every settled call (op, args, result) to a
+file; `--replay run.trace` re-runs without `--tool` flags, reconstructing the
+tools from the trace and serving the recorded results (docs/host.md).
+
 Zig: **0.16.0**
