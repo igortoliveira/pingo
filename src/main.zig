@@ -8,6 +8,23 @@ const max_read_depth = 64;
 const repl_limits: pingo.eval.Limits = .{ .fuel = 10_000_000, .call_depth = 1_000 };
 const repl_heap_bytes = 256 * 1024 * 1024; // per session (the v0 arena never frees)
 
+/// The REPL's one host capability: `(print v ...)` writes through the host's
+/// stdout. The guest has no I/O of its own (§4) — this is the demonstration
+/// that effects only exist where the host grants them.
+const PrintHost = struct {
+    out: *std.Io.Writer,
+
+    fn print(ctx: *anyopaque, _: std.mem.Allocator, args: []const pingo.value.Value) pingo.capability.HostError!pingo.value.Value {
+        const h: *PrintHost = @ptrCast(@alignCast(ctx));
+        for (args, 0..) |a, i| {
+            if (i > 0) h.out.writeByte(' ') catch return error.HostError;
+            pingo.printer.writeValue(a, h.out) catch return error.HostError;
+        }
+        h.out.writeByte('\n') catch return error.HostError;
+        return .unspecified;
+    }
+};
+
 pub fn main(init: std.process.Init) !void {
     var stdin_buffer: [max_line_bytes]u8 = undefined;
     var stdin_reader: std.Io.File.Reader = .init(.stdin(), init.io, &stdin_buffer);
@@ -24,6 +41,15 @@ pub fn main(init: std.process.Init) !void {
     var session_heap = pingo.limits.LimitedAllocator.init(session_arena_state.allocator(), repl_heap_bytes);
     const session_arena = session_heap.allocator();
     var evaluator = try pingo.eval.Evaluator.init(session_arena, repl_limits);
+
+    var print_host = PrintHost{ .out = out };
+    const print_cap = pingo.capability.Capability{
+        .name = "print",
+        .class = .globally_ordered,
+        .ctx = &print_host,
+        .handler = PrintHost.print,
+    };
+    try pingo.capability.register(evaluator.global, &print_cap);
 
     while (true) {
         try out.writeAll("pingo> ");
