@@ -124,7 +124,18 @@ pub const Machine = struct {
     pub fn evalToplevel(m: *Machine, d: Datum) Error!Outcome {
         // Calls left over from a previous (failed) feed are abandoned: they
         // were dispatched — that observation stands — but nothing waits on
-        // them anymore (§3 abort semantics).
+        // them anymore (§3 abort semantics). Abandonment settles them as
+        // failed (§4): a pending that escaped into surviving state via a
+        // mutator must force to host-error later, not wait forever on a
+        // call the host no longer tracks.
+        for (m.outstanding_calls.items) |p|
+            if (p.state == .outstanding) {
+                p.state = .failed;
+            };
+        for (m.parked_calls.items) |pk|
+            if (pk.result.state == .outstanding) {
+                pk.result.state = .failed;
+            };
         m.outstanding_calls.clearRetainingCapacity();
         m.feed_calls.clearRetainingCapacity();
         m.parked_calls.clearRetainingCapacity();
@@ -1559,4 +1570,34 @@ test "machine: syntax errors and fuel" {
 
     t.machine.?.limits.fuel = t.machine.?.fuel_used; // nothing left
     try std.testing.expectError(error.LimitExceeded, t.run("1"));
+}
+
+test "machine: pendings abandoned by a failed feed settle as failed" {
+    var t = TestMachine.init();
+    defer t.deinit();
+    _ = try t.run("(define g 0)");
+    const arena = t.arena_state.allocator();
+    const m = &t.machine.?;
+    var dummy: u8 = 0;
+    const cap = capability_mod.Capability{ .name = "ask", .class = .external_independent, .ctx = &dummy, .handler = nopHandler };
+    try capability_mod.register(m.global, &cap);
+
+    // Dispatches ask (eager continue), stores the unsettled pending into g
+    // through non-strict list + assign, then fails the feed with the call
+    // still outstanding.
+    try std.testing.expectError(
+        Error.TypeError,
+        m.evalToplevel(try readOne(arena, "(begin (set! g (list (ask 1))) (car '()))")),
+    );
+    try std.testing.expectEqual(@as(usize, 1), m.outstanding().len);
+
+    // The next feed abandons that call (§4: settles as failed); forcing the
+    // escaped pending is host-error, not a wait on an untracked call.
+    try std.testing.expectError(
+        Error.HostError,
+        m.evalToplevel(try readOne(arena, "(car g)")),
+    );
+
+    // and the session stays usable
+    try std.testing.expectEqual(@as(i64, 2), (try t.run("(+ 1 1)")).integer);
 }
