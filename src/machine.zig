@@ -33,6 +33,9 @@ const Control = union(enum) {
     value: Value,
     /// Strict wait on one pending call (§4 strictness points).
     awaiting: *Pending,
+    /// Drain barrier before an ordered-class dispatch (§4): waits until no
+    /// call is outstanding, then re-delivers to the apply frame beneath.
+    barrier,
 };
 
 const Expr = struct { d: Datum, env: *Env };
@@ -190,6 +193,12 @@ pub const Machine = struct {
                         return Error.HostError;
                     },
                     .outstanding => return .blocked,
+                },
+                .barrier => {
+                    if (m.outstanding_calls.items.len > 0) return .blocked;
+                    // Drained: re-deliver to the apply frame, which retries
+                    // the dispatch (now with a clear boundary).
+                    m.control = .{ .value = .unspecified };
                 },
             }
         }
@@ -352,17 +361,31 @@ pub const Machine = struct {
                         return Error.TypeError;
                     }
                 }
-                // Dispatch: the call becomes a pending settled by the host.
+                // Ordered classes (§4): drain outstanding calls first, and
+                // never dispatch past an already-failed call — the strongest
+                // clause of §6 (an irreversible call a failing sequential run
+                // would not reach must never be dispatched).
+                switch (c.class) {
+                    .pure, .external_independent => {},
+                    .resource_ordered, .globally_ordered, .irreversible => {
+                        for (m.feed_calls.items) |prior| if (prior.state == .failed) {
+                            m.diagnostic = .{ .context = prior.capability.name };
+                            return Error.HostError;
+                        };
+                        if (m.outstanding_calls.items.len > 0) {
+                            try m.pushFrame(.{ .apply = .{ .collected = collected } });
+                            return .barrier;
+                        }
+                    },
+                }
+                // Dispatch: the call becomes a pending settled by the host,
+                // and evaluation continues — blocking only happens at
+                // strictness points and the toplevel sync.
                 const p = try m.arena.create(Pending);
                 p.* = .{ .capability = c, .args = args };
                 try m.outstanding_calls.append(m.arena, p);
                 try m.feed_calls.append(m.arena, p);
-                return switch (c.class) {
-                    // No effect at all: continuing past it is trivially safe.
-                    // external-independent joins in 6.14.
-                    .pure => .{ .value = .{ .pending = p } },
-                    else => .{ .awaiting = p },
-                };
+                return .{ .value = .{ .pending = p } };
             },
             else => return Error.NotAProcedure,
         }
@@ -693,6 +716,103 @@ test "machine: a failed call fails the feed even when never forced" {
     m.resolveFailure(m.outstanding()[0]);
     try std.testing.expectError(error.HostError, m.continueRun());
     try std.testing.expectEqualStrings("pask", m.diagnostic.?.context);
+}
+
+test "machine: independent fan-out overlaps — four calls outstanding at once" {
+    var t = TestMachine.init();
+    defer t.deinit();
+    _ = try t.run("1");
+    const arena = t.arena_state.allocator();
+    const m = &t.machine.?;
+
+    var dummy: u8 = 0;
+    const ask = capability_mod.Capability{ .name = "ask", .class = .external_independent, .ctx = &dummy, .handler = nopHandler };
+    const sink = capability_mod.Capability{ .name = "sink", .class = .external_independent, .ctx = &dummy, .handler = nopHandler };
+    try capability_mod.register(m.global, &ask);
+    try capability_mod.register(m.global, &sink);
+
+    // P1's shape: four independent calls flow through cons; sink's deep
+    // force blocks with ALL FOUR outstanding — the opportunism the study
+    // measured (§4 dispatch order = program order).
+    const outcome = try m.evalToplevel(try readOne(arena,
+        "(sink (cons (ask 1) (cons (ask 2) (cons (ask 3) (cons (ask 4) '())))))"));
+    try std.testing.expect(outcome == .blocked);
+    const calls = m.outstanding();
+    try std.testing.expectEqual(@as(usize, 4), calls.len);
+    for (calls, 1..) |c, i| {
+        try std.testing.expectEqualStrings("ask", c.capability.name);
+        try std.testing.expectEqual(@as(i64, @intCast(i)), c.args[0].integer);
+    }
+
+    // Completion order is the host's freedom: resolve in reverse.
+    var i = calls.len;
+    var pinned: [4]*Pending = undefined;
+    @memcpy(&pinned, calls);
+    while (i > 0) {
+        i -= 1;
+        m.resolve(pinned[i], .{ .integer = pinned[i].args[0].integer * 10 });
+    }
+    var out = try m.continueRun();
+    try std.testing.expect(out == .blocked); // now sink itself is outstanding
+    const s = m.outstanding()[0];
+    try std.testing.expectEqualStrings("sink", s.capability.name);
+    // sink received the fully forced list (10 20 30 40)
+    try std.testing.expectEqual(@as(i64, 10), s.args[0].pair.car.integer);
+    try std.testing.expectEqual(@as(i64, 40), s.args[0].pair.cdr.pair.cdr.pair.cdr.pair.car.integer);
+    m.resolve(s, .{ .symbol = "ok" });
+    out = try m.continueRun();
+    try std.testing.expectEqualStrings("ok", out.value.symbol);
+}
+
+test "machine: ordered calls drain the outstanding set first" {
+    var t = TestMachine.init();
+    defer t.deinit();
+    _ = try t.run("1");
+    const arena = t.arena_state.allocator();
+    const m = &t.machine.?;
+
+    var dummy: u8 = 0;
+    const ask = capability_mod.Capability{ .name = "ask", .class = .external_independent, .ctx = &dummy, .handler = nopHandler };
+    const emit = capability_mod.Capability{ .name = "emit", .class = .irreversible, .ctx = &dummy, .handler = nopHandler };
+    try capability_mod.register(m.global, &ask);
+    try capability_mod.register(m.global, &emit);
+
+    // (begin (ask 1) (emit 2) 3): emit must not dispatch while ask is in
+    // flight — the machine blocks at the barrier with only ask outstanding.
+    const outcome = try m.evalToplevel(try readOne(arena, "(begin (ask 1) (emit 2) 3)"));
+    try std.testing.expect(outcome == .blocked);
+    try std.testing.expectEqual(@as(usize, 1), m.outstanding().len);
+    try std.testing.expectEqualStrings("ask", m.outstanding()[0].capability.name);
+
+    m.resolve(m.outstanding()[0], .{ .integer = 0 });
+    var out = try m.continueRun();
+    try std.testing.expect(out == .blocked);
+    try std.testing.expectEqualStrings("emit", m.outstanding()[0].capability.name);
+    m.resolve(m.outstanding()[0], .unspecified);
+    out = try m.continueRun();
+    try std.testing.expectEqual(@as(i64, 3), out.value.integer);
+}
+
+test "machine: an irreversible call never dispatches after a failed call" {
+    var t = TestMachine.init();
+    defer t.deinit();
+    _ = try t.run("1");
+    const arena = t.arena_state.allocator();
+    const m = &t.machine.?;
+
+    var dummy: u8 = 0;
+    const ask = capability_mod.Capability{ .name = "ask", .class = .external_independent, .ctx = &dummy, .handler = nopHandler };
+    const emit = capability_mod.Capability{ .name = "emit", .class = .irreversible, .ctx = &dummy, .handler = nopHandler };
+    try capability_mod.register(m.global, &ask);
+    try capability_mod.register(m.global, &emit);
+
+    const outcome = try m.evalToplevel(try readOne(arena, "(begin (ask 1) (emit 2) 3)"));
+    try std.testing.expect(outcome == .blocked);
+    m.resolveFailure(m.outstanding()[0]); // ask fails
+    try std.testing.expectError(error.HostError, m.continueRun());
+    // emit was never dispatched: the strongest §6 clause
+    try std.testing.expectEqual(@as(usize, 0), m.outstanding().len);
+    try std.testing.expectEqualStrings("ask", m.diagnostic.?.context);
 }
 
 test "machine: blocked hands the call to the host and continues mid-expression" {
