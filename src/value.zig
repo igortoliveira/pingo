@@ -30,6 +30,7 @@ pub const Value = union(enum) {
     symbol: []const u8,
     string: []u8, // mutable bytes (§1); literals evaluate to fresh copies
     pair: *Pair,
+    vector: []Value,
     empty_list,
     unspecified,
     closure: *Closure,
@@ -102,6 +103,11 @@ fn isPureDataInner(v0: Value, depth: usize, budget: *usize) bool {
             .pair => |p| {
                 if (!isPureDataInner(p.car, depth + 1, budget)) return false;
                 v = p.cdr; // iterate the spine
+            },
+            .vector => |items| {
+                for (items) |item|
+                    if (!isPureDataInner(item, depth + 1, budget)) return false;
+                return true;
             },
             .closure, .primitive, .capability => return false,
             // Deep force substitutes resolved pendings before this check runs.
@@ -201,6 +207,11 @@ pub fn fromDatum(arena: std.mem.Allocator, d: datum_mod.Datum) std.mem.Allocator
                 .cdr = try fromDatum(arena, p.cdr),
             };
             break :blk .{ .pair = out };
+        },
+        .vector => |items| blk: {
+            const out = try arena.alloc(Value, items.len);
+            for (items, 0..) |item, i| out[i] = try fromDatum(arena, item);
+            break :blk .{ .vector = out };
         },
     };
 }

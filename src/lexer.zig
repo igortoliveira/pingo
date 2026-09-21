@@ -17,6 +17,7 @@ pub const Token = struct {
         symbol,
         boolean, // #t or #f; which one is in the source text
         character, // #\x, #\space, #\newline — decoded by the reader
+        vector_open, // #(
         string, // includes the surrounding quotes; escapes are decoded by the reader
         invalid,
         eof,
@@ -113,6 +114,10 @@ pub const Lexer = struct {
 
     fn boolean(l: *Lexer, start: usize) Token {
         l.pos += 1; // consume '#'
+        if (l.pos < l.src.len and l.src[l.pos] == '(') {
+            l.pos += 1;
+            return .{ .tag = .vector_open, .start = start, .end = l.pos };
+        }
         if (l.pos < l.src.len and l.src[l.pos] == '\\') {
             l.pos += 1; // consume the backslash
             if (l.pos >= l.src.len) return .{ .tag = .invalid, .start = start, .end = l.pos };

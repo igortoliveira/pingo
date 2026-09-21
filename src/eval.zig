@@ -146,6 +146,8 @@ pub const Evaluator = struct {
                 .integer => |n| return .{ .integer = n },
                 .real => |x| return .{ .real = x },
                 .char => |c| return .{ .char = c },
+                // #(...) literals evaluate like quoted data: a fresh copy (§1)
+                .vector => return try value_mod.fromDatum(e.arena, d),
                 .boolean => |b| return .{ .boolean = b },
                 .string => |s| return .{ .string = try e.arena.dupe(u8, s) },
                 // () is not a valid expression, only a value produced by quote.

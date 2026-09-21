@@ -237,6 +237,8 @@ pub const Machine = struct {
             .integer => |n| return .{ .value = .{ .integer = n } },
             .real => |r| return .{ .value = .{ .real = r } },
             .char => |c| return .{ .value = .{ .char = c } },
+            // #(...) literals evaluate like quoted data: a fresh copy (§1)
+            .vector => return .{ .value = try value_mod.fromDatum(m.arena, x.d) },
             .boolean => |b| return .{ .value = .{ .boolean = b } },
             .string => |s| return .{ .value = .{ .string = try m.arena.dupe(u8, s) } },
             .empty_list => return Error.BadSyntax,
@@ -543,6 +545,20 @@ pub const Machine = struct {
             .value => |real| real,
             .blocked => |p| return .{ .blocked = p },
         };
+        if (v == .vector) {
+            var changed = false;
+            const out = try m.arena.alloc(Value, v.vector.len);
+            for (v.vector, 0..) |item, i| {
+                if (budget.* == 0) return m.walkerLimit();
+                budget.* -= 1;
+                out[i] = switch (try m.forceDeepInner(item, depth + 1, budget)) {
+                    .value => |real| real,
+                    .blocked => |p| return .{ .blocked = p },
+                };
+                if (!primitives.eqValues(out[i], item)) changed = true;
+            }
+            return .{ .value = if (changed) .{ .vector = out } else v };
+        }
         if (v != .pair) return .{ .value = v };
 
         // collect the spine, forcing each element
@@ -1243,6 +1259,12 @@ test "differential: machine and oracle agree on a form corpus" {
         "(list (string->number \"42\") (string->number \"1e2\") (string->number \"ff\" 16) (string->number \"nope\"))",
         "(string->number \"\")",
         "(list (symbol? 'a) (symbol? \"a\") (boolean? #f) (procedure? car) (procedure? 'car))",
+        // vectors (8E.2)
+        "#(1 2.5 \"s\" #\\c (nested list) #(inner))",
+        "'#(a b)",
+        "(equal? #(1 2) #(1 2))",
+        "(equal? #(1 2) #(1 3))",
+        "(eqv? #(1) #(1))",
         // cond/and/or (7.3): short-circuit means untaken positions may be unbound
         "(cond (#f 1) ((eq? 1 1) 'hit) (else 'miss))",
         "(cond (#f 1))",

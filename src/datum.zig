@@ -15,6 +15,7 @@ pub const Datum = union(enum) {
     symbol: []const u8,
     string: []const u8, // decoded bytes (escapes already resolved)
     pair: *Pair,
+    vector: []Datum,
     empty_list,
 
     pub const Pair = struct {

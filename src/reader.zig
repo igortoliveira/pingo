@@ -76,6 +76,7 @@ pub const Reader = struct {
                 return try datum_mod.cons(r.arena, try datum_mod.symbol(r.arena, "quote"), tail);
             },
             .lparen => return try r.list(depth + 1),
+            .vector_open => return try r.vector(depth + 1),
             .rparen => return error.UnexpectedRightParen,
             .invalid => return error.InvalidToken,
             .eof => return error.UnexpectedEndOfInput,
@@ -117,6 +118,21 @@ pub const Reader = struct {
             result = try datum_mod.cons(r.arena, items.items[i], result);
         }
         return result;
+    }
+
+    fn vector(r: *Reader, depth: usize) Error!Datum {
+        if (depth > r.max_depth) return error.DepthLimitExceeded;
+        var items: std.ArrayList(Datum) = .empty;
+        defer items.deinit(r.arena);
+        while (true) {
+            const tok = r.lexer.next();
+            switch (tok.tag) {
+                .rparen => break,
+                .eof => return error.UnexpectedEndOfInput,
+                else => try items.append(r.arena, try r.datum(tok, depth)),
+            }
+        }
+        return .{ .vector = try r.arena.dupe(Datum, items.items) };
     }
 
     fn decodeString(r: *Reader, tok: Token) Error![]const u8 {
@@ -200,6 +216,22 @@ test "depth limit" {
     var t2 = TestReader.init();
     defer t2.deinit();
     _ = (try t2.start("(((1)))", 3).read()).?; // exactly at the limit is fine
+}
+
+test "vector literals" {
+    var t = TestReader.init();
+    defer t.deinit();
+    const r = t.start("#(1 two #(3)) #()", 8);
+    const v = (try r.read()).?.vector;
+    try std.testing.expectEqual(@as(usize, 3), v.len);
+    try std.testing.expectEqual(@as(i64, 1), v[0].integer);
+    try std.testing.expectEqualStrings("two", v[1].symbol);
+    try std.testing.expectEqual(@as(i64, 3), v[2].vector[0].integer);
+    try std.testing.expectEqual(@as(usize, 0), (try r.read()).?.vector.len);
+
+    var t2 = TestReader.init();
+    defer t2.deinit();
+    try std.testing.expectError(error.UnexpectedEndOfInput, t2.start("#(1 2", 8).read());
 }
 
 test "char atoms" {

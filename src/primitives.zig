@@ -700,6 +700,13 @@ fn equalInner(a0: Value, b0: Value, depth: usize, budget: *usize) error{LimitExc
         if (@as(std.meta.Tag(Value), a) != @as(std.meta.Tag(Value), b)) return false;
         switch (a) {
             .string => return std.mem.eql(u8, a.string, b.string),
+            .vector => {
+                if (a.vector.ptr == b.vector.ptr) return true;
+                if (a.vector.len != b.vector.len) return false;
+                for (a.vector, b.vector) |x, y|
+                    if (!try equalInner(x, y, depth + 1, budget)) return false;
+                return true;
+            },
             .pair => {
                 if (a.pair == b.pair) return true; // same cell (incl. shared cycles)
                 if (!try equalInner(a.pair.car, b.pair.car, depth + 1, budget)) return false;
@@ -911,6 +918,7 @@ pub fn eqValues(a: Value, b: Value) bool {
         .primitive => a.primitive == b.primitive,
         .capability => a.capability == b.capability,
         .pending => a.pending == b.pending,
+        .vector => a.vector.ptr == b.vector.ptr and a.vector.len == b.vector.len,
     };
 }
 

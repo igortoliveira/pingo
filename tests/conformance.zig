@@ -86,7 +86,7 @@ const FormIterator = struct {
             const tok = it.lexer.next();
             switch (tok.tag) {
                 .eof => return null,
-                .lparen => {
+                .lparen, .vector_open => {
                     if (depth == 0) start = tok.start;
                     depth += 1;
                 },
@@ -275,6 +275,7 @@ fn check(
                 if (!try check(arena, rest.pair.car, evaluator, bound)) return false;
             return true;
         },
+        .vector => return true, // vector literals are data
         else => return true,
     }
 }

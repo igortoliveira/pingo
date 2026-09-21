@@ -16,6 +16,14 @@ pub fn write(d: Datum, w: *std.Io.Writer) std.Io.Writer.Error!void {
         .symbol => |s| try w.writeAll(s),
         .string => |s| try writeString(s, w),
         .empty_list => try w.writeAll("()"),
+        .vector => |items| {
+            try w.writeAll("#(");
+            for (items, 0..) |item, i| {
+                if (i > 0) try w.writeByte(' ');
+                try write(item, w);
+            }
+            try w.writeByte(')');
+        },
         .pair => |p| {
             try w.writeByte('(');
             try write(p.car, w);
@@ -59,6 +67,15 @@ fn writeValueDepth(v: Value, w: *std.Io.Writer, depth: usize) std.Io.Writer.Erro
         .primitive => |p| try w.print("#<procedure {s}>", .{p.name}),
         .capability => |c| try w.print("#<capability {s}>", .{c.name}),
         .pending => |p| try w.print("#<pending {s}>", .{p.capability.name}),
+        .vector => |items| {
+            try w.writeAll("#(");
+            for (items, 0..) |item, i| {
+                if (i > 0) try w.writeByte(' ');
+                if (i > 10_000) return w.writeAll(" ...)");
+                try writeValueDepth(item, w, depth + 1);
+            }
+            try w.writeByte(')');
+        },
         .pair => |p| {
             try w.writeByte('(');
             try writeValueDepth(p.car, w, depth + 1);
