@@ -172,6 +172,18 @@ pub const Evaluator = struct {
                         d = try expand.expandLet(e.arena, p.cdr);
                         continue;
                     }
+                    if (isForm(p, "cond")) {
+                        d = try expand.expandCond(e.arena, p.cdr, scope.lookup("else") != null);
+                        continue;
+                    }
+                    if (isForm(p, "and")) {
+                        d = try expand.expandAnd(e.arena, p.cdr);
+                        continue;
+                    }
+                    if (isForm(p, "or")) {
+                        d = try expand.expandOr(e.arena, p.cdr);
+                        continue;
+                    }
                     if (isForm(p, "begin")) {
                         // (begin e1 ... en), n >= 1: sequential by definition (§2).
                         var rest = p.cdr;

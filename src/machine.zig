@@ -251,6 +251,12 @@ pub const Machine = struct {
                     return .{ .value = try value_mod.makeClosure(m.arena, p.cdr, x.env) };
                 if (isForm(p, "let"))
                     return .{ .expr = .{ .d = try expand.expandLet(m.arena, p.cdr), .env = x.env } };
+                if (isForm(p, "cond"))
+                    return .{ .expr = .{ .d = try expand.expandCond(m.arena, p.cdr, x.env.lookup("else") != null), .env = x.env } };
+                if (isForm(p, "and"))
+                    return .{ .expr = .{ .d = try expand.expandAnd(m.arena, p.cdr), .env = x.env } };
+                if (isForm(p, "or"))
+                    return .{ .expr = .{ .d = try expand.expandOr(m.arena, p.cdr), .env = x.env } };
 
                 // Application: validate the shape upfront, then evaluate the
                 // operator with an app frame waiting for it.
@@ -926,6 +932,16 @@ test "differential: machine and oracle agree on a form corpus" {
         "(let (x) 1)",
         "(let ((x 1)))",
         "(let ((x 1) (x 2)) x)",
+        // cond/and/or (7.3): short-circuit means untaken positions may be unbound
+        "(cond (#f 1) ((eq? 1 1) 'hit) (else 'miss))",
+        "(cond (#f 1))",
+        "(and 1 2 3)",
+        "(and #f boom)",
+        "(and)",
+        "(or #f 7 boom)",
+        "(or #f #f)",
+        "(let ((t 5)) (or #f t))",
+        "(cond (else 1) (2 3))",
     };
 
     for (corpus) |src| {
