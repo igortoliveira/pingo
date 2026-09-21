@@ -22,6 +22,8 @@ pub const Diagnostic = eval_mod.Diagnostic;
 
 pub const Pending = Value.Pending;
 
+const prelude_src = @embedFile("prelude.scm");
+
 pub const Outcome = union(enum) {
     value: Value,
     /// The machine cannot advance until the host resolves at least one of
@@ -82,7 +84,29 @@ pub const Machine = struct {
     pub fn init(arena: std.mem.Allocator, limits: Limits) std.mem.Allocator.Error!Machine {
         const global = try Env.init(arena, null);
         try primitives.install(global);
-        return .{ .arena = arena, .global = global, .limits = limits };
+        var m = Machine{ .arena = arena, .global = global, .limits = limits };
+        try m.loadPrelude();
+        return m;
+    }
+
+    /// Evaluates the embedded prelude (§7) under an internal budget. The
+    /// prelude is trusted runtime source: any failure besides OOM is a build
+    /// bug, not a runtime condition.
+    fn loadPrelude(m: *Machine) std.mem.Allocator.Error!void {
+        const saved = m.limits;
+        m.limits = .{ .fuel = 10_000_000, .call_depth = 500 };
+        defer {
+            m.limits = saved;
+            m.fuel_used = 0;
+        }
+        var r = reader_mod.Reader.init(m.arena, prelude_src, 64);
+        while (r.read() catch unreachable) |d| {
+            const outcome = m.evalToplevel(d) catch |err| switch (err) {
+                Error.OutOfMemory => return error.OutOfMemory,
+                else => unreachable,
+            };
+            std.debug.assert(outcome == .value); // the prelude has no capabilities
+        }
     }
 
     pub fn evalToplevel(m: *Machine, d: Datum) Error!Outcome {
@@ -1047,6 +1071,25 @@ test "differential: machine and oracle agree on a form corpus" {
         "(apply +)",
         "(apply + 3)",
         "(apply 1 '(2))",
+        // prelude (8F'.6)
+        "(map (lambda (x) (* x x)) '(1 2 3))",
+        "(map + '(1 2 3) '(10 20 30))",
+        "(map car '((a b) (d e)))",
+        "(for-each (lambda (x) x) '(1 2))",
+        "(reverse '(1 2 3))",
+        "(assq 'b '((a 1) (b 2)))",
+        "(assoc \"b\" '((\"a\" 1) (\"b\" 2)))",
+        "(assv 5 '((1 a) (5 b)))",
+        "(memq 'c '(a b c d))",
+        "(member '(1) '((0) (1) (2)))",
+        "(list-tail '(a b c d) 2)",
+        "(list-ref '(a b c) 1)",
+        "(cadr '(1 2 3))",
+        "(caddr '(1 2 3))",
+        "(list? '(1 2))",
+        "(list? '(1 . 2))",
+        "(abs -7) (abs 7)",
+        "(max 3 9 2) (min 3 9 2)",
         // cond/and/or (7.3): short-circuit means untaken positions may be unbound
         "(cond (#f 1) ((eq? 1 1) 'hit) (else 'miss))",
         "(cond (#f 1))",

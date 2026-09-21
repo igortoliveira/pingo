@@ -1,0 +1,80 @@
+; Pingo standard prelude (semantics §7): R5RS library procedures defined in
+; the language itself. Runs at session init under an internal budget; grants
+; no authority. Names starting with % are internal helpers by convention.
+;
+; Written in Scheme on purpose: procedures built on cons/list compose with
+; pending values (non-strict cons), which a strict Zig primitive would break.
+
+(define (caar p) (car (car p)))
+(define (cadr p) (car (cdr p)))
+(define (cdar p) (cdr (car p)))
+(define (cddr p) (cdr (cdr p)))
+(define (caddr p) (car (cddr p)))
+(define (cdddr p) (cdr (cddr p)))
+(define (cadddr p) (car (cdddr p)))
+
+(define (list-tail xs k) (if (= k 0) xs (list-tail (cdr xs) (- k 1))))
+(define (list-ref xs k) (car (list-tail xs k)))
+
+(define (reverse xs)
+  (let loop ((xs xs) (acc '()))
+    (if (null? xs) acc (loop (cdr xs) (cons (car xs) acc)))))
+
+; No mutation exists yet (§1), so cyclic lists are impossible and the naive
+; walk is total. Revisit when set-cdr! lands (tier 8C).
+(define (list? x)
+  (cond ((null? x) #t)
+        ((pair? x) (list? (cdr x)))
+        (else #f)))
+
+(define (%map1 f xs)
+  (if (null? xs) '() (cons (f (car xs)) (%map1 f (cdr xs)))))
+(define (%cars xss) (%map1 car xss))
+(define (%cdrs xss) (%map1 cdr xss))
+(define (%any-null? xss)
+  (cond ((null? xss) #f)
+        ((null? (car xss)) #t)
+        (else (%any-null? (cdr xss)))))
+
+(define (map f . lists)
+  (cond ((null? lists) '())
+        ((null? (cdr lists)) (%map1 f (car lists)))
+        (else
+         (let loop ((xss lists))
+           (if (%any-null? xss)
+               '()
+               (cons (apply f (%cars xss)) (loop (%cdrs xss))))))))
+
+(define (for-each f . lists)
+  (if (null? lists)
+      (if #f #f)
+      (let loop ((xss lists))
+        (if (%any-null? xss)
+            (if #f #f)
+            (begin (apply f (%cars xss)) (loop (%cdrs xss)))))))
+
+(define (%assoc-by pred k xs)
+  (cond ((null? xs) #f)
+        ((pred (caar xs) k) (car xs))
+        (else (%assoc-by pred k (cdr xs)))))
+(define (assq k xs) (%assoc-by eq? k xs))
+(define (assv k xs) (%assoc-by eqv? k xs))
+(define (assoc k xs) (%assoc-by equal? k xs))
+
+(define (%member-by pred k xs)
+  (cond ((null? xs) #f)
+        ((pred (car xs) k) xs)
+        (else (%member-by pred k (cdr xs)))))
+(define (memq k xs) (%member-by eq? k xs))
+(define (memv k xs) (%member-by eqv? k xs))
+(define (member k xs) (%member-by equal? k xs))
+
+(define (abs n) (if (< n 0) (- n) n))
+
+(define (%extremum pick a rest)
+  (let loop ((m a) (xs rest))
+    (if (null? xs)
+        m
+        (loop (if (pick (car xs) m) (car xs) m) (cdr xs)))))
+(define (max a . rest) (%extremum > a rest))
+(define (min a . rest) (%extremum < a rest))

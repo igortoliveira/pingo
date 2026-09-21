@@ -82,7 +82,27 @@ pub const Evaluator = struct {
     pub fn init(arena: std.mem.Allocator, limits: Limits) std.mem.Allocator.Error!Evaluator {
         const global = try Env.init(arena, null);
         try primitives.install(global);
-        return .{ .arena = arena, .global = global, .limits = limits };
+        var e = Evaluator{ .arena = arena, .global = global, .limits = limits };
+        try e.loadPrelude();
+        return e;
+    }
+
+    /// Evaluates the embedded prelude (§7) under an internal budget; trusted
+    /// runtime source, so failures besides OOM are build bugs.
+    fn loadPrelude(e: *Evaluator) std.mem.Allocator.Error!void {
+        const saved = e.limits;
+        e.limits = .{ .fuel = 10_000_000, .call_depth = 500 };
+        defer {
+            e.limits = saved;
+            e.fuel_used = 0;
+        }
+        var r = reader_mod.Reader.init(e.arena, @embedFile("prelude.scm"), 64);
+        while (r.read() catch unreachable) |d| {
+            _ = e.evalToplevel(d) catch |err| switch (err) {
+                Error.OutOfMemory => return error.OutOfMemory,
+                else => unreachable,
+            };
+        }
     }
 
     fn chargeFuel(e: *Evaluator) Error!void {
