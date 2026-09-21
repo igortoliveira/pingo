@@ -47,6 +47,7 @@ pub fn writeValue(v: Value, w: *std.Io.Writer) std.Io.Writer.Error!void {
         .closure => try w.writeAll("#<procedure>"),
         .primitive => |p| try w.print("#<procedure {s}>", .{p.name}),
         .capability => |c| try w.print("#<capability {s}>", .{c.name}),
+        .pending => |p| try w.print("#<pending {s}>", .{p.capability.name}),
         .pair => |p| {
             try w.writeByte('(');
             try writeValue(p.car, w);

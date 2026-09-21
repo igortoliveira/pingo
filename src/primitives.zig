@@ -99,6 +99,7 @@ pub fn eqValues(a: Value, b: Value) bool {
         .closure => a.closure == b.closure,
         .primitive => a.primitive == b.primitive,
         .capability => a.capability == b.capability,
+        .pending => a.pending == b.pending,
     };
 }
 

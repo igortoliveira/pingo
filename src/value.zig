@@ -34,12 +34,29 @@ pub const Value = union(enum) {
     /// Host capability (§4): kept distinct from primitive so the external
     /// boundary stays semantically visible to the runtime and scheduler.
     capability: *const capability_mod.Capability,
+    /// Internal placeholder for an outstanding external call (§4 "Pending
+    /// values"). Never guest-detectable; forced at strictness points.
+    pending: *Pending,
 
     pub const Pair = struct { car: Value, cdr: Value };
 
     pub const Primitive = struct {
         name: []const u8,
         func: *const fn (arena: std.mem.Allocator, args: []const Value) PrimitiveError!Value,
+    };
+
+    /// One outstanding/settled external call. Resolves in place: every Value
+    /// holding this pointer observes the settlement.
+    pub const Pending = struct {
+        capability: *const capability_mod.Capability,
+        args: []const Value,
+        state: State = .outstanding,
+
+        pub const State = union(enum) {
+            outstanding,
+            resolved: Value,
+            failed,
+        };
     };
 
     pub const Closure = struct {
@@ -62,6 +79,8 @@ pub fn isPureData(v: Value) bool {
         .integer, .boolean, .symbol, .string, .empty_list, .unspecified => true,
         .pair => |p| isPureData(p.car) and isPureData(p.cdr),
         .closure, .primitive, .capability => false,
+        // Deep force substitutes resolved pendings before this check runs.
+        .pending => false,
     };
 }
 
