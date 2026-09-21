@@ -23,6 +23,7 @@ const table = [_]Value.Primitive{
     .{ .name = "cdr", .func = cdr },
     .{ .name = "null?", .func = isNull },
     .{ .name = "pair?", .func = isPair },
+    .{ .name = "eq?", .func = eq },
 };
 
 fn exactly(args: []const Value, n: usize) PrimitiveError!void {
@@ -82,6 +83,27 @@ fn isNull(_: std.mem.Allocator, args: []const Value) PrimitiveError!Value {
 fn isPair(_: std.mem.Allocator, args: []const Value) PrimitiveError!Value {
     try exactly(args, 1);
     return .{ .boolean = args[0] == .pair };
+}
+
+/// Identity comparison: immediates by value, symbols by name (v0 does not
+/// intern), heap objects (pairs, strings, closures, primitives) by identity.
+pub fn eqValues(a: Value, b: Value) bool {
+    if (@as(std.meta.Tag(Value), a) != @as(std.meta.Tag(Value), b)) return false;
+    return switch (a) {
+        .integer => a.integer == b.integer,
+        .boolean => a.boolean == b.boolean,
+        .symbol => std.mem.eql(u8, a.symbol, b.symbol),
+        .string => a.string.ptr == b.string.ptr and a.string.len == b.string.len,
+        .pair => a.pair == b.pair,
+        .empty_list, .unspecified => true,
+        .closure => a.closure == b.closure,
+        .primitive => a.primitive == b.primitive,
+    };
+}
+
+fn eq(_: std.mem.Allocator, args: []const Value) PrimitiveError!Value {
+    try exactly(args, 2);
+    return .{ .boolean = eqValues(args[0], args[1]) };
 }
 
 /// v0 `/` is truncating integer division (only integers exist, §1).

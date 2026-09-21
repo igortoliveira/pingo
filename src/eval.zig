@@ -85,6 +85,16 @@ pub const Evaluator = struct {
                     return .unspecified;
                 }
                 if (isForm(p, "lambda")) return e.makeClosure(p.cdr, scope);
+                if (isForm(p, "begin")) {
+                    // (begin e1 ... en), n >= 1: sequential by definition (§2).
+                    var rest = p.cdr;
+                    if (rest != .pair) return Error.BadSyntax;
+                    var result: Value = .unspecified;
+                    while (rest == .pair) : (rest = rest.pair.cdr)
+                        result = try e.eval(rest.pair.car, scope);
+                    if (rest != .empty_list) return Error.BadSyntax;
+                    return result;
+                }
 
                 // Application. The reference evaluator picks left-to-right,
                 // one of the sequential orders §2 allows.
@@ -341,6 +351,35 @@ test "list primitive errors" {
     try std.testing.expectError(error.TypeError, s.run("(cdr 5)"));
     try std.testing.expectError(error.ArityMismatch, s.run("(cons 1)"));
     try std.testing.expectError(error.ArityMismatch, s.run("(null?)"));
+}
+
+test "begin sequences and returns the last value" {
+    var s = TestSession.init();
+    defer s.deinit();
+    try std.testing.expectEqual(@as(i64, 3), (try s.run("(begin 1 2 3)")).integer);
+    try std.testing.expectEqual(@as(i64, 1), (try s.run("(begin 1)")).integer);
+    try std.testing.expectError(error.BadSyntax, s.run("(begin)"));
+    // earlier expressions do run (their errors fire)
+    try std.testing.expectError(error.DivideByZero, s.run("(begin (/ 1 0) 2)"));
+}
+
+test "eq? identity semantics" {
+    var s = TestSession.init();
+    defer s.deinit();
+    try std.testing.expectEqual(true, (try s.run("(eq? 1 1)")).boolean);
+    try std.testing.expectEqual(false, (try s.run("(eq? 1 2)")).boolean);
+    try std.testing.expectEqual(true, (try s.run("(eq? 'a 'a)")).boolean);
+    try std.testing.expectEqual(true, (try s.run("(eq? '() '())")).boolean);
+    try std.testing.expectEqual(false, (try s.run("(eq? 1 'a)")).boolean);
+    // pairs by identity, not structure
+    try std.testing.expectEqual(false, (try s.run("(eq? (cons 1 2) (cons 1 2))")).boolean);
+    _ = try s.run("(define p (cons 1 2))");
+    try std.testing.expectEqual(true, (try s.run("(eq? p p)")).boolean);
+    // closures/primitives by identity
+    try std.testing.expectEqual(true, (try s.run("(eq? + +)")).boolean);
+    _ = try s.run("(define f (lambda (x) x))");
+    try std.testing.expectEqual(true, (try s.run("(eq? f f)")).boolean);
+    try std.testing.expectEqual(false, (try s.run("(eq? f (lambda (x) x))")).boolean);
 }
 
 test "define binds, returns unspecified, and persists" {
