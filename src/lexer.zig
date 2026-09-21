@@ -16,6 +16,7 @@ pub const Token = struct {
         real, // has a fraction and/or exponent part
         symbol,
         boolean, // #t or #f; which one is in the source text
+        character, // #\x, #\space, #\newline — decoded by the reader
         string, // includes the surrounding quotes; escapes are decoded by the reader
         invalid,
         eof,
@@ -112,6 +113,14 @@ pub const Lexer = struct {
 
     fn boolean(l: *Lexer, start: usize) Token {
         l.pos += 1; // consume '#'
+        if (l.pos < l.src.len and l.src[l.pos] == '\\') {
+            l.pos += 1; // consume the backslash
+            if (l.pos >= l.src.len) return .{ .tag = .invalid, .start = start, .end = l.pos };
+            l.pos += 1; // the named/literal char's first byte
+            // a letter may start a char name (space, newline)
+            while (l.pos < l.src.len and isSymbolChar(l.src[l.pos])) l.pos += 1;
+            return .{ .tag = .character, .start = start, .end = l.pos };
+        }
         if (l.pos < l.src.len and (l.src[l.pos] == 't' or l.src[l.pos] == 'f')) {
             l.pos += 1;
             if (l.pos >= l.src.len or isDelimiter(l.src[l.pos]))

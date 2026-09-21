@@ -26,6 +26,7 @@ pub const Value = union(enum) {
     integer: i64,
     real: f64,
     boolean: bool,
+    char: u8,
     symbol: []const u8,
     string: []const u8,
     pair: *Pair,
@@ -97,7 +98,7 @@ fn isPureDataInner(v0: Value, depth: usize, budget: *usize) bool {
         if (budget.* == 0) return false;
         budget.* -= 1;
         switch (v) {
-            .integer, .real, .boolean, .symbol, .string, .empty_list, .unspecified => return true,
+            .integer, .real, .boolean, .char, .symbol, .string, .empty_list, .unspecified => return true,
             .pair => |p| {
                 if (!isPureDataInner(p.car, depth + 1, budget)) return false;
                 v = p.cdr; // iterate the spine
@@ -189,6 +190,7 @@ pub fn fromDatum(arena: std.mem.Allocator, d: datum_mod.Datum) std.mem.Allocator
         .integer => |n| .{ .integer = n },
         .real => |x| .{ .real = x },
         .boolean => |b| .{ .boolean = b },
+        .char => |c| .{ .char = c },
         .symbol => |s| .{ .symbol = try arena.dupe(u8, s) },
         .string => |s| .{ .string = try arena.dupe(u8, s) },
         .empty_list => .empty_list,

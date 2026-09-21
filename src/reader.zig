@@ -51,6 +51,14 @@ pub const Reader = struct {
                 return .{ .real = x };
             },
             .boolean => return .{ .boolean = r.lexer.src[tok.start + 1] == 't' },
+            .character => {
+                const body = r.lexer.src[tok.start + 2 .. tok.end]; // after #\
+                if (body.len == 1) return .{ .char = body[0] };
+                if (std.mem.eql(u8, body, "space")) return .{ .char = ' ' };
+                if (std.mem.eql(u8, body, "newline")) return .{ .char = '\n' };
+                if (std.mem.eql(u8, body, "tab")) return .{ .char = '\t' };
+                return error.InvalidToken;
+            },
             .symbol => {
                 const text = r.lexer.src[tok.start..tok.end];
                 // A lone dot is only meaningful inside a list (handled there).
@@ -192,6 +200,21 @@ test "depth limit" {
     var t2 = TestReader.init();
     defer t2.deinit();
     _ = (try t2.start("(((1)))", 3).read()).?; // exactly at the limit is fine
+}
+
+test "char atoms" {
+    var t = TestReader.init();
+    defer t.deinit();
+    const r = t.start("#\\a #\\space #\\newline #\\( #\\1", 8);
+    try std.testing.expectEqual(@as(u8, 'a'), (try r.read()).?.char);
+    try std.testing.expectEqual(@as(u8, ' '), (try r.read()).?.char);
+    try std.testing.expectEqual(@as(u8, '\n'), (try r.read()).?.char);
+    try std.testing.expectEqual(@as(u8, '('), (try r.read()).?.char);
+    try std.testing.expectEqual(@as(u8, '1'), (try r.read()).?.char);
+
+    var t2 = TestReader.init();
+    defer t2.deinit();
+    try std.testing.expectError(error.InvalidToken, t2.start("#\\bogus", 8).read());
 }
 
 test "real atoms" {

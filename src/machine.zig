@@ -236,6 +236,7 @@ pub const Machine = struct {
         switch (x.d) {
             .integer => |n| return .{ .value = .{ .integer = n } },
             .real => |r| return .{ .value = .{ .real = r } },
+            .char => |c| return .{ .value = .{ .char = c } },
             .boolean => |b| return .{ .value = .{ .boolean = b } },
             .string => |s| return .{ .value = .{ .string = try m.arena.dupe(u8, s) } },
             .empty_list => return Error.BadSyntax,
@@ -1202,6 +1203,12 @@ test "differential: machine and oracle agree on a form corpus" {
         "(define c (list 1 2)) (set-cdr! (cdr c) c) (list? c)",
         "(define c2 (list 1 2)) (set-cdr! (cdr c2) c2) (length c2)",
         "(define c3 (list 1 2)) (set-cdr! (cdr c3) c3) (equal? c3 c3)",
+        // chars (8D.2)
+        "#\\a",
+        "'(#\\space #\\newline #\\A #\\0 #\\()",
+        "(eqv? #\\a #\\a)",
+        "(eqv? #\\a #\\b)",
+        "(eqv? #\\a 'a)",
         // cond/and/or (7.3): short-circuit means untaken positions may be unbound
         "(cond (#f 1) ((eq? 1 1) 'hit) (else 'miss))",
         "(cond (#f 1))",

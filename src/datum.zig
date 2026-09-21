@@ -11,6 +11,7 @@ pub const Datum = union(enum) {
     integer: i64,
     real: f64,
     boolean: bool,
+    char: u8,
     symbol: []const u8,
     string: []const u8, // decoded bytes (escapes already resolved)
     pair: *Pair,

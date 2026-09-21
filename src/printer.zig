@@ -11,6 +11,7 @@ pub fn write(d: Datum, w: *std.Io.Writer) std.Io.Writer.Error!void {
     switch (d) {
         .integer => |n| try w.print("{d}", .{n}),
         .real => |x| try writeReal(x, w),
+        .char => |c| try writeChar(c, w),
         .boolean => |b| try w.writeAll(if (b) "#t" else "#f"),
         .symbol => |s| try w.writeAll(s),
         .string => |s| try writeString(s, w),
@@ -48,6 +49,7 @@ fn writeValueDepth(v: Value, w: *std.Io.Writer, depth: usize) std.Io.Writer.Erro
     switch (v) {
         .integer => |n| try w.print("{d}", .{n}),
         .real => |x| try writeReal(x, w),
+        .char => |c| try writeChar(c, w),
         .boolean => |b| try w.writeAll(if (b) "#t" else "#f"),
         .symbol => |s| try w.writeAll(s),
         .string => |s| try writeString(s, w),
@@ -85,6 +87,15 @@ pub fn writeReal(x: f64, w: *std.Io.Writer) std.Io.Writer.Error!void {
     if (@floor(x) == x and @abs(x) < 1e15)
         return w.print("{d}.0", .{@as(i64, @intFromFloat(x))});
     try w.print("{d}", .{x});
+}
+
+pub fn writeChar(c: u8, w: *std.Io.Writer) std.Io.Writer.Error!void {
+    switch (c) {
+        ' ' => try w.writeAll("#\\space"),
+        '\n' => try w.writeAll("#\\newline"),
+        '\t' => try w.writeAll("#\\tab"),
+        else => try w.print("#\\{c}", .{c}),
+    }
 }
 
 fn writeString(s: []const u8, w: *std.Io.Writer) std.Io.Writer.Error!void {
