@@ -20,6 +20,7 @@ pub const Error = error{
     TypeError,
     DivideByZero,
     IntegerOverflow,
+    HostError,
     LimitExceeded,
     Unsupported, // placeholder for plan items not landed yet
     OutOfMemory,
@@ -53,6 +54,7 @@ pub fn kindOf(err: Error) []const u8 {
         Error.TypeError => "type-error",
         Error.DivideByZero => "divide-by-zero",
         Error.IntegerOverflow => "integer-overflow",
+        Error.HostError => "host-error",
         Error.LimitExceeded => "limit-exceeded",
         Error.Unsupported => "bad-syntax", // unimplemented forms read as syntax for now
         Error.OutOfMemory => "limit-exceeded",
@@ -252,6 +254,27 @@ pub const Evaluator = struct {
                 e.diagnostic = .{ .context = p.name };
                 return err;
             },
+            .capability => |c| {
+                // §4: only pure data crosses the boundary, in either direction.
+                for (args) |a| if (!isPureData(a)) {
+                    e.diagnostic = .{ .context = c.name };
+                    return Error.TypeError;
+                };
+                // v0 realization of suspension (§4): dispatch synchronously,
+                // resume with the handler's value or error.
+                const result = c.handler(c.ctx, e.arena, args) catch |err| {
+                    e.diagnostic = .{ .context = c.name };
+                    return switch (err) {
+                        error.HostError => Error.HostError,
+                        error.OutOfMemory => Error.OutOfMemory,
+                    };
+                };
+                if (!isPureData(result)) {
+                    e.diagnostic = .{ .context = c.name };
+                    return Error.HostError; // misbehaving host handler
+                }
+                return result;
+            },
             else => return Error.NotAProcedure,
         }
     }
@@ -264,6 +287,15 @@ fn isForm(p: *const Datum.Pair, name: []const u8) bool {
 /// Semantics §2: only #f is false.
 fn isTruthy(v: Value) bool {
     return !(v == .boolean and !v.boolean);
+}
+
+/// §4: pure data — no procedures or capabilities anywhere in the tree.
+fn isPureData(v: Value) bool {
+    return switch (v) {
+        .integer, .boolean, .symbol, .string, .empty_list, .unspecified => true,
+        .pair => |p| isPureData(p.car) and isPureData(p.cdr),
+        .closure, .primitive, .capability => false,
+    };
 }
 
 // -- tests --------------------------------------------------------------
@@ -568,6 +600,82 @@ test "heap budget stops a heap bomb as limit-exceeded" {
 }
 
 const limits_mod = @import("limits.zig");
+
+const capability_mod = @import("capability.zig");
+
+const EchoHost = struct {
+    calls: usize = 0,
+
+    fn double(ctx: *anyopaque, _: std.mem.Allocator, args: []const Value) capability_mod.HostError!Value {
+        const h: *EchoHost = @ptrCast(@alignCast(ctx));
+        h.calls += 1;
+        if (args.len != 1 or args[0] != .integer) return error.HostError;
+        return .{ .integer = args[0].integer * 2 };
+    }
+
+    fn boom(_: *anyopaque, _: std.mem.Allocator, _: []const Value) capability_mod.HostError!Value {
+        return error.HostError;
+    }
+};
+
+test "capability dispatch: value in, value out, host sees the call" {
+    var s = TestSession.init();
+    defer s.deinit();
+    _ = try s.run("1"); // force evaluator creation
+
+    var host = EchoHost{};
+    const cap = capability_mod.Capability{
+        .name = "double",
+        .class = .external_independent,
+        .ctx = &host,
+        .handler = EchoHost.double,
+    };
+    try capability_mod.register(s.evaluator.?.global, &cap);
+
+    try std.testing.expectEqual(@as(i64, 14), (try s.run("(double 7)")).integer);
+    try std.testing.expectEqual(@as(i64, 8), (try s.run("(double (double 2))")).integer);
+    try std.testing.expectEqual(@as(usize, 3), host.calls);
+}
+
+test "capability errors surface as host-error with the capability name" {
+    var s = TestSession.init();
+    defer s.deinit();
+    _ = try s.run("1");
+
+    var host = EchoHost{};
+    const cap = capability_mod.Capability{
+        .name = "flaky",
+        .class = .globally_ordered,
+        .ctx = &host,
+        .handler = EchoHost.boom,
+    };
+    try capability_mod.register(s.evaluator.?.global, &cap);
+
+    try std.testing.expectError(error.HostError, s.run("(flaky 1)"));
+    try std.testing.expectEqualStrings("flaky", s.evaluator.?.diagnostic.?.context);
+    try std.testing.expectEqualStrings("host-error", kindOf(error.HostError));
+    // session continues (§3)
+    try std.testing.expectEqual(@as(i64, 2), (try s.run("(+ 1 1)")).integer);
+}
+
+test "only pure data crosses the boundary" {
+    var s = TestSession.init();
+    defer s.deinit();
+    _ = try s.run("1");
+
+    var host = EchoHost{};
+    const cap = capability_mod.Capability{
+        .name = "send",
+        .class = .globally_ordered,
+        .ctx = &host,
+        .handler = EchoHost.double,
+    };
+    try capability_mod.register(s.evaluator.?.global, &cap);
+
+    try std.testing.expectError(error.TypeError, s.run("(send (lambda (x) x))"));
+    try std.testing.expectError(error.TypeError, s.run("(send (cons 1 +))")); // nested
+    try std.testing.expectEqualStrings("send", s.evaluator.?.diagnostic.?.context);
+}
 
 test "tail calls do not grow the stack" {
     var s = TestSession.init();
