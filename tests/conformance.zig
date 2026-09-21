@@ -65,6 +65,13 @@ pub fn main(init: std.process.Init) !void {
     try out.print("conformance: {d} pass, {d} fail, {d} skip\n", .{ pass, fail, skip });
     try out.flush();
     if (fail > 0) std.process.exit(1);
+    // Regression floor: raise this whenever new features convert skips to
+    // passes; a drop means a feature silently stopped being recognized.
+    const pass_floor = 64;
+    if (pass < pass_floor) {
+        std.debug.print("conformance: pass count {d} fell below the floor {d}\n", .{ pass, pass_floor });
+        std.process.exit(1);
+    }
 }
 
 /// Iterates over top-level parenthesized forms via the lexer (so strings and
