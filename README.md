@@ -6,5 +6,6 @@ effect-oriented — with Scheme as its first frontend. Implemented in Zig.
 - Motivation and architecture: `deep-research-report.md`
 - Execution plan (small commits): `PLAN.md`
 - Normative semantics: `docs/semantics.md` (in progress)
+- Source systems and papers (Thorin, Monty, PopPy/λᴼ, …): `docs/references.md`
 
 Zig: **0.16.0**
