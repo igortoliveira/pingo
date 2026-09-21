@@ -87,6 +87,48 @@ def test_async_capabilities_overlap():
     assert order == ["b", "a"]  # b finished first despite being second — real concurrency
 
 
+def test_on_batch_hook():
+    from pingo import Batch
+
+    async def slow(tag, delay):
+        await asyncio.sleep(delay)
+        return tag
+
+    async def f(n):
+        await asyncio.sleep(0.01)
+        return n + 1
+
+    async def g(n):
+        await asyncio.sleep(0.01)
+        return n * 10
+
+    async def main():
+        batches: list[Batch] = []
+        async with Session() as s:
+            s.define_async("slow", slow)
+            s.define_async("f", f)
+            s.define_async("g", g)
+            # fan-out: two calls dispatched together -> one batch of two
+            await s.run('(list (slow "a" 0.02) (slow "b" 0.01))', on_batch=batches.append)
+            fanout = list(batches)
+            batches.clear()
+            # chained: g depends on f -> two batches of one
+            await s.run("(g (f 1))", on_batch=batches.append)
+            chained = list(batches)
+        return fanout, chained
+
+    try:
+        Session()
+    except LibraryNotFound:
+        pytest.skip("libpingo not built (run `zig build`)")
+
+    fanout, chained = asyncio.run(main())
+    assert len(fanout) == 1
+    assert len(fanout[0].calls) == 2
+    assert fanout[0].seconds >= 0
+    assert [len(b.calls) for b in chained] == [1, 1]
+
+
 def test_async_result():
     async def double(n):
         return n * 2

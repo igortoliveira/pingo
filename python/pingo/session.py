@@ -27,6 +27,8 @@ from __future__ import annotations
 
 import asyncio
 import ctypes
+import time
+from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
 
 from . import _lib
@@ -35,6 +37,7 @@ from .sexpr import dumps, loads
 
 __all__ = [
     "Session",
+    "Batch",
     "PingoError",
     "PURE",
     "INDEPENDENT",
@@ -50,6 +53,16 @@ DEFAULT_CALL_DEPTH = 10_000
 class PingoError(RuntimeError):
     """A guest evaluation error (the message is the Scheme error kind and
     context, e.g. ``unbound-variable (foo)``)."""
+
+
+@dataclass(frozen=True)
+class Batch:
+    """One serviced batch of outstanding calls (see `Session.run`): each call
+    rendered as ``name(args)``, plus the wall-clock seconds servicing took.
+    The calls in a batch were dispatched together — they ran concurrently."""
+
+    calls: tuple[str, ...]
+    seconds: float
 
 
 class Session:
@@ -134,21 +147,35 @@ class Session:
         if self._lib.pingo_register(self._ptr, name.encode("utf-8"), cls) != 0:
             raise ValueError(f"could not register capability {name!r}")
 
-    async def run(self, src: str) -> Any:
+    async def run(self, src: str, *, on_batch: Callable[[Batch], None] | None = None) -> Any:
         """Feeds `src` and drives the blocked/resolve loop, running each batch
         of outstanding capability calls concurrently. Returns the last form's
-        value; raises `PingoError` on failure."""
+        value; raises `PingoError` on failure.
+
+        Pass `on_batch` to observe each serviced batch: it receives a `Batch`
+        (the calls that ran together and the wall-clock seconds they took),
+        making the opportunistic parallelism visible without reaching into the
+        session's internals."""
         status = self._lib.pingo_feed(self._ptr, src.encode("utf-8"))
         while status == BLOCKED:
-            await self._service_batch()
+            await self._service_batch(on_batch)
             status = self._lib.pingo_continue(self._ptr)
         if status == ERROR:
             raise PingoError(self._error())
         return loads(self._lib.pingo_result(self._ptr).decode("utf-8"))
 
-    async def _service_batch(self) -> None:
+    async def _service_batch(self, on_batch: Callable[[Batch], None] | None = None) -> None:
         count = self._lib.pingo_outstanding_count(self._ptr)
         tokens = [self._lib.pingo_call_token(self._ptr, i) for i in range(count)]
+
+        # Render the calls only when observed — the C reads aren't free.
+        calls: list[str] | None = None
+        if on_batch is not None:
+            calls = []
+            for token in tokens:
+                name = (self._lib.pingo_call_name(self._ptr, token) or b"").decode("utf-8")
+                args = (self._lib.pingo_call_args(self._ptr, token) or b"").decode("utf-8")
+                calls.append(f"{name}{args}")
 
         async def one(token: int) -> tuple[int, Any, bool]:
             name = self._lib.pingo_call_name(self._ptr, token).decode("utf-8")
@@ -161,11 +188,16 @@ class Session:
             except Exception:  # noqa: BLE001 - any failure is a host-error
                 return token, None, False
 
-        for token, result, ok in await asyncio.gather(*(one(t) for t in tokens)):
+        started = time.monotonic()
+        results = await asyncio.gather(*(one(t) for t in tokens))
+        for token, result, ok in results:
             if ok:
                 self._lib.pingo_resolve(self._ptr, token, dumps(result).encode("utf-8"))
             else:
                 self._lib.pingo_resolve_failure(self._ptr, token)
+
+        if on_batch is not None:
+            on_batch(Batch(tuple(calls), time.monotonic() - started))
 
     # -- misc -------------------------------------------------------------
 

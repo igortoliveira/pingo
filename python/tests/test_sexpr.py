@@ -4,7 +4,7 @@ import math
 
 import pytest
 
-from pingo import Char, Pair, Symbol, Vector, dumps, loads
+from pingo import Char, Pair, Symbol, Vector, alist_get, dumps, loads
 from pingo.sexpr import UNSPECIFIED, SExprError
 
 
@@ -63,3 +63,18 @@ def test_errors():
         loads("(1 2")
     with pytest.raises(SExprError):
         loads("")
+
+
+def test_alist_get():
+    # dotted-pair entries: (quote ((a . 1) (b . 2)))
+    dotted = loads("((a . 1) (b . 2))")
+    assert alist_get(dotted, Symbol("a")) == 1
+    assert alist_get(dotted, Symbol("b")) == 2
+    assert alist_get(dotted, Symbol("z")) is None
+    assert alist_get(dotted, Symbol("z"), "x") == "x"
+    # two-element-list entries: ((a 1) (b 2))
+    listy = loads("((a 1) (b 2))")
+    assert alist_get(listy, Symbol("a")) == 1
+    assert alist_get(listy, Symbol("b")) == 2
+    # non-list input
+    assert alist_get(42, Symbol("a"), "d") == "d"

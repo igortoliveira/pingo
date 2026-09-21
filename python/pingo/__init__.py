@@ -19,11 +19,12 @@ from ._lib import (
     RESOURCE,
     LibraryNotFound,
 )
-from .session import PingoError, Session
-from .sexpr import Char, Pair, SExprError, Symbol, Vector, dumps, loads
+from .session import Batch, PingoError, Session
+from .sexpr import Char, Pair, SExprError, Symbol, Vector, alist_get, dumps, loads
 
 __all__ = [
     "Session",
+    "Batch",
     "PingoError",
     "LibraryNotFound",
     "Symbol",
@@ -31,6 +32,7 @@ __all__ = [
     "Pair",
     "Vector",
     "SExprError",
+    "alist_get",
     "dumps",
     "loads",
     "PURE",

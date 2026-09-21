@@ -287,6 +287,20 @@ class _Parser:
         return _atom(token)
 
 
+def alist_get(alist: object, key: object, default: object = None) -> object:
+    """Looks up `key` in a parsed association list — the guest's idiom for a
+    structured record. Accepts both entry shapes Pingo's reader produces: a
+    dotted pair `(key . value)` (a `Pair`) and a two-element list `(key value)`.
+    Returns `default` when `alist` is not a list or the key is absent."""
+    if isinstance(alist, list):
+        for entry in alist:
+            if isinstance(entry, Pair) and entry.car == key:
+                return entry.cdr
+            if isinstance(entry, list) and len(entry) == 2 and entry[0] == key:
+                return entry[1]
+    return default
+
+
 def _atom(token: str) -> object:
     if token in ("+inf.0", "-inf.0"):
         return math.inf if token[0] == "+" else -math.inf
