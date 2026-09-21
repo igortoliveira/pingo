@@ -223,6 +223,10 @@ pub const Evaluator = struct {
                         d = try expand.expandDo(e.arena, p.cdr);
                         continue;
                     }
+                    if (isForm(p, "delay")) {
+                        d = try expand.expandDelay(e.arena, p.cdr);
+                        continue;
+                    }
                     if (isForm(p, "letrec")) {
                         if (p.cdr != .pair) return Error.BadSyntax;
                         var body = p.cdr.pair.cdr;

@@ -371,6 +371,22 @@ pub fn defineParts(arena: std.mem.Allocator, form: Datum) Error!DefineParts {
     }
 }
 
+/// `(delay e)` → `(%make-promise (lambda () e))` (§2 Promises): `e` moves
+/// into a thunk unevaluated; the prelude supplies `%make-promise`/`force`.
+pub fn expandDelay(arena: std.mem.Allocator, form: Datum) Error!Datum {
+    if (form != .pair or form.pair.cdr != .empty_list) return error.BadSyntax;
+    const lambda_form = try datum_mod.cons(
+        arena,
+        try datum_mod.symbol(arena, "lambda"),
+        try datum_mod.cons(arena, .empty_list, form),
+    );
+    return datum_mod.cons(
+        arena,
+        try datum_mod.symbol(arena, "%make-promise"),
+        try datum_mod.cons(arena, lambda_form, .empty_list),
+    );
+}
+
 fn isDefineForm(d: Datum) bool {
     return d == .pair and d.pair.car == .symbol and
         std.mem.eql(u8, d.pair.car.symbol, "define");

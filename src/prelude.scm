@@ -126,3 +126,16 @@
 (define char-ci>? (%ci char>?))
 (define char-ci<=? (%ci char<=?))
 (define char-ci>=? (%ci char>=?))
+
+;; promises (S2 Promises): delay expands to (%make-promise (lambda () e)).
+;; A promise memoizes on first force; force on a non-promise returns it.
+(define (%make-promise thunk) (vector '%promise #f thunk))
+(define (force p)
+  (if (and (vector? p) (= (vector-length p) 3) (eq? (vector-ref p 0) '%promise))
+      (if (vector-ref p 1)
+          (vector-ref p 2)
+          (begin
+            (vector-set! p 2 ((vector-ref p 2)))
+            (vector-set! p 1 #t)
+            (vector-ref p 2)))
+      p))

@@ -354,6 +354,8 @@ pub const Machine = struct {
                     return .{ .expr = .{ .d = try expand.expandCase(m.arena, p.cdr), .env = x.env } };
                 if (isForm(p, "do"))
                     return .{ .expr = .{ .d = try expand.expandDo(m.arena, p.cdr), .env = x.env } };
+                if (isForm(p, "delay"))
+                    return .{ .expr = .{ .d = try expand.expandDelay(m.arena, p.cdr), .env = x.env } };
                 if (isForm(p, "letrec")) {
                     if (p.cdr != .pair) return Error.BadSyntax;
                     var body = p.cdr.pair.cdr;
@@ -1311,6 +1313,13 @@ test "differential: machine and oracle agree on a form corpus" {
         "((lambda () (define x 1)))",
         "((lambda () 1 (define x 2)))",
         "((lambda () (define x 1) (define x 2) x))",
+        // delay/force (8H'.4): memoized on first force
+        "(force (delay (+ 1 2)))",
+        "(define n 0) (define p (delay (begin (set! n (+ n 1)) n))) (+ (force p) (force p))",
+        "(force 42)",
+        "(force (force (delay (delay 7))))",
+        "(delay)",
+        "(delay 1 2)",
         // rest args (8F'.4)
         "((lambda args args) 1 2 3)",
         "((lambda args args))",
