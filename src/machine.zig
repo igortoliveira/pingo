@@ -72,7 +72,7 @@ pub const Machine = struct {
     fn run(m: *Machine, d0: Datum, env0: *Env, define_name: ?[]const u8) Error!Value {
         m.frames.clearRetainingCapacity();
         if (define_name) |name|
-            try m.frames.append(m.arena, .{ .define = .{ .name = name } });
+            try m.pushFrame(.{ .define = .{ .name = name } });
         var control: Control = .{ .expr = .{ .d = d0, .env = env0 } };
         while (true) {
             try m.chargeFuel();
@@ -118,7 +118,7 @@ pub const Machine = struct {
                         },
                         else => return Error.BadSyntax,
                     }
-                    try m.frames.append(m.arena, .{ .branch = .{ .then = t.car, .alt = alt, .env = x.env } });
+                    try m.pushFrame(.{ .branch = .{ .then = t.car, .alt = alt, .env = x.env } });
                     return .{ .expr = .{ .d = c.pair.car, .env = x.env } };
                 }
                 if (isForm(p, "begin")) {
@@ -136,7 +136,7 @@ pub const Machine = struct {
                 var check = p.cdr;
                 while (check == .pair) : (check = check.pair.cdr) {}
                 if (check != .empty_list) return Error.BadSyntax;
-                try m.frames.append(m.arena, .{ .app = .{
+                try m.pushFrame(.{ .app = .{
                     .remaining = p.cdr,
                     .env = x.env,
                     .collected = .empty,
@@ -150,7 +150,7 @@ pub const Machine = struct {
     /// pushes no frame (proper tail calls, §5).
     fn enterSequence(m: *Machine, seq: Datum, env: *Env) Error!Control {
         if (seq.pair.cdr == .pair)
-            try m.frames.append(m.arena, .{ .seq = .{ .rest = seq.pair.cdr, .env = env } });
+            try m.pushFrame(.{ .seq = .{ .rest = seq.pair.cdr, .env = env } });
         return .{ .expr = .{ .d = seq.pair.car, .env = env } };
     }
 
@@ -174,7 +174,7 @@ pub const Machine = struct {
                 if (app.remaining == .pair) {
                     const next = app.remaining.pair.car;
                     app.remaining = app.remaining.pair.cdr;
-                    try m.frames.append(m.arena, .{ .app = app });
+                    try m.pushFrame(.{ .app = app });
                     return .{ .expr = .{ .d = next, .env = app.env } };
                 }
                 return m.applyCollected(app.collected.items);
@@ -182,7 +182,7 @@ pub const Machine = struct {
             .body => |b| {
                 if (b.rest.len == 1) // tail position: push nothing
                     return .{ .expr = .{ .d = b.rest[0], .env = b.env } };
-                try m.frames.append(m.arena, .{ .body = .{ .rest = b.rest[1..], .env = b.env } });
+                try m.pushFrame(.{ .body = .{ .rest = b.rest[1..], .env = b.env } });
                 return .{ .expr = .{ .d = b.rest[0], .env = b.env } };
             },
         }
@@ -198,7 +198,7 @@ pub const Machine = struct {
                 for (c.params, args) |name, arg| try child.define(name, arg);
                 if (c.body.len == 1) // tail position: push nothing
                     return .{ .expr = .{ .d = c.body[0], .env = child } };
-                try m.frames.append(m.arena, .{ .body = .{ .rest = c.body[1..], .env = child } });
+                try m.pushFrame(.{ .body = .{ .rest = c.body[1..], .env = child } });
                 return .{ .expr = .{ .d = c.body[0], .env = child } };
             },
             .primitive => |p| {
@@ -208,7 +208,28 @@ pub const Machine = struct {
                 };
                 return .{ .value = result };
             },
-            else => return Error.NotAProcedure, // capabilities land in 6.6
+            .capability => |c| {
+                // §4: only pure data crosses the boundary, in either direction.
+                for (args) |a| if (!value_mod.isPureData(a)) {
+                    m.diagnostic = .{ .context = c.name };
+                    return Error.TypeError;
+                };
+                // Still the synchronous v0 realization; detachable suspension
+                // replaces this call in stage 2.
+                const result = c.handler(c.ctx, m.arena, args) catch |err| {
+                    m.diagnostic = .{ .context = c.name };
+                    return switch (err) {
+                        error.HostError => Error.HostError,
+                        error.OutOfMemory => Error.OutOfMemory,
+                    };
+                };
+                if (!value_mod.isPureData(result)) {
+                    m.diagnostic = .{ .context = c.name };
+                    return Error.HostError; // misbehaving host handler
+                }
+                return .{ .value = result };
+            },
+            else => return Error.NotAProcedure,
         }
     }
 
@@ -218,6 +239,16 @@ pub const Machine = struct {
             return Error.LimitExceeded;
         }
         m.fuel_used += 1;
+    }
+
+    /// §5 call_depth, realized as a bound on live frames (tail positions push
+    /// nothing, so tail calls consume no depth).
+    fn pushFrame(m: *Machine, frame: Frame) Error!void {
+        if (m.frames.items.len >= m.limits.call_depth) {
+            m.diagnostic = .{ .context = "call-depth" };
+            return Error.LimitExceeded;
+        }
+        try m.frames.append(m.arena, frame);
     }
 };
 
@@ -353,6 +384,50 @@ test "machine: tail calls keep the frame stack flat" {
     try std.testing.expectEqualStrings("done", (try t.run("(loop 100000)")).symbol);
     // 100k tail iterations never grew the stack: capacity stays tiny.
     try std.testing.expect(t.machine.?.frames.capacity < 64);
+}
+
+test "machine: deep non-tail recursion hits the frame limit" {
+    var t = TestMachine.init();
+    defer t.deinit();
+    _ = try t.run("(define fact (lambda (n) (if (eq? n 0) 1 (* n (fact (- n 1))))))");
+    try std.testing.expectError(error.LimitExceeded, t.run("(fact 1000000)"));
+    try std.testing.expectEqualStrings("call-depth", t.machine.?.diagnostic.?.context);
+    // frames reset per toplevel run; the session still works
+    try std.testing.expectEqual(@as(i64, 120), (try t.run("(fact 5)")).integer);
+}
+
+const capability_mod = @import("capability.zig");
+
+const CountingHost = struct {
+    calls: usize = 0,
+
+    fn double(ctx: *anyopaque, _: std.mem.Allocator, args: []const Value) capability_mod.HostError!Value {
+        const h: *CountingHost = @ptrCast(@alignCast(ctx));
+        h.calls += 1;
+        if (args.len != 1 or args[0] != .integer) return error.HostError;
+        return .{ .integer = args[0].integer * 2 };
+    }
+};
+
+test "machine: capability dispatch with §4 boundary checks" {
+    var t = TestMachine.init();
+    defer t.deinit();
+    _ = try t.run("1");
+
+    var host = CountingHost{};
+    const cap = capability_mod.Capability{
+        .name = "double",
+        .class = .external_independent,
+        .ctx = &host,
+        .handler = CountingHost.double,
+    };
+    try capability_mod.register(t.machine.?.global, &cap);
+
+    try std.testing.expectEqual(@as(i64, 8), (try t.run("(double (double 2))")).integer);
+    try std.testing.expectEqual(@as(usize, 2), host.calls);
+    try std.testing.expectError(error.TypeError, t.run("(double (lambda (x) x))"));
+    try std.testing.expectError(error.HostError, t.run("(double 'nan)"));
+    try std.testing.expectEqualStrings("double", t.machine.?.diagnostic.?.context);
 }
 
 test "machine: syntax errors and fuel" {

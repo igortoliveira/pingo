@@ -260,14 +260,7 @@ fn isForm(p: *const Datum.Pair, name: []const u8) bool {
 
 const isTruthy = value_mod.isTruthy;
 
-/// §4: pure data — no procedures or capabilities anywhere in the tree.
-fn isPureData(v: Value) bool {
-    return switch (v) {
-        .integer, .boolean, .symbol, .string, .empty_list, .unspecified => true,
-        .pair => |p| isPureData(p.car) and isPureData(p.cdr),
-        .closure, .primitive, .capability => false,
-    };
-}
+const isPureData = value_mod.isPureData;
 
 // -- tests --------------------------------------------------------------
 

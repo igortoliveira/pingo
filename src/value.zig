@@ -56,6 +56,15 @@ pub fn isTruthy(v: Value) bool {
     return !(v == .boolean and !v.boolean);
 }
 
+/// §4: pure data — no procedures or capabilities anywhere in the tree.
+pub fn isPureData(v: Value) bool {
+    return switch (v) {
+        .integer, .boolean, .symbol, .string, .empty_list, .unspecified => true,
+        .pair => |p| isPureData(p.car) and isPureData(p.cdr),
+        .closure, .primitive, .capability => false,
+    };
+}
+
 /// Parses `(lambda (p ...) body1 ... bodyn)` given `form` = the datum after
 /// the `lambda` symbol. Shared by the reference evaluator and the machine so
 /// the shape rules can't drift apart. n >= 1; params are distinct symbols.
