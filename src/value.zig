@@ -46,8 +46,14 @@ pub const Value = union(enum) {
     /// (a frame-stack snapshot) belongs to the machine; here it is an opaque
     /// identity, compared by pointer. `docs/callcc.md`.
     continuation: *Continuation,
+    /// A `syntax-rules` macro keyword (tier 8I). Bound like a variable but is
+    /// **not a value**: using it in value position is a syntax error. The
+    /// transformer layout belongs to `macro.zig`; opaque here.
+    /// `docs/syntax-rules.md`.
+    macro: *Macro,
 
     pub const Continuation = opaque {};
+    pub const Macro = opaque {};
 
     pub const Pair = struct { car: Value, cdr: Value };
 
@@ -116,7 +122,7 @@ fn isPureDataInner(v0: Value, depth: usize, budget: *usize) bool {
                     if (!isPureDataInner(item, depth + 1, budget)) return false;
                 return true;
             },
-            .closure, .primitive, .capability, .continuation => return false,
+            .closure, .primitive, .capability, .continuation, .macro => return false,
             // Deep force substitutes resolved pendings before this check runs.
             .pending => return false,
         }

@@ -8,6 +8,7 @@ const value_mod = @import("value.zig");
 const env_mod = @import("env.zig");
 const primitives = @import("primitives.zig");
 const expand = @import("expand.zig");
+const macro_mod = @import("macro.zig");
 
 const Datum = datum_mod.Datum;
 const Value = value_mod.Value;
@@ -121,6 +122,10 @@ pub const Evaluator = struct {
     /// Entry point for programs/REPL lines: only here `define` is legal (§2).
     pub fn evalToplevel(e: *Evaluator, d: Datum) Error!Value {
         e.diagnostic = null;
+        if (d == .pair and isForm(d.pair, "define-syntax")) {
+            try macro_mod.defineSyntax(e.arena, d.pair.cdr, e.global);
+            return .unspecified;
+        }
         if (d == .pair and isForm(d.pair, "define")) {
             const parts = try expand.defineParts(e.arena, d.pair.cdr);
             const v = try e.eval(parts.expr, e.global);
@@ -157,7 +162,14 @@ pub const Evaluator = struct {
                 .string => |s| return .{ .string = try e.arena.dupe(u8, s) },
                 // () is not a valid expression, only a value produced by quote.
                 .empty_list => return Error.BadSyntax,
-                .symbol => |name| return scope.lookup(name) orelse {
+                .symbol => |name| {
+                    if (scope.lookup(name)) |v| {
+                        if (v == .macro) { // syntactic keyword, not a value (§2)
+                            e.diagnostic = .{ .context = name };
+                            return Error.BadSyntax;
+                        }
+                        return v;
+                    }
                     e.diagnostic = .{ .context = name };
                     return Error.UnboundVariable;
                 },
@@ -273,6 +285,14 @@ pub const Evaluator = struct {
                         while (rest.pair.cdr == .pair) : (rest = rest.pair.cdr)
                             _ = try e.eval(rest.pair.car, scope);
                         d = rest.pair.car; // tail position
+                        continue;
+                    }
+                    if (isForm(p, "define-syntax")) return Error.BadSyntax; // top/body only (§2)
+
+                    // Macro use (§2, tier 8I): a keyword bound in scope expands
+                    // and re-evaluates. Core/derived forms above take precedence.
+                    if (macro_mod.lookupMacro(d, scope)) |mac| {
+                        d = try macro_mod.expand(e.arena, mac, d);
                         continue;
                     }
 

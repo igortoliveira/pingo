@@ -1042,6 +1042,7 @@ pub fn eqValues(a: Value, b: Value) bool {
         .capability => a.capability == b.capability,
         .pending => a.pending == b.pending,
         .continuation => a.continuation == b.continuation,
+        .macro => a.macro == b.macro,
         .vector => a.vector.ptr == b.vector.ptr and a.vector.len == b.vector.len,
     };
 }

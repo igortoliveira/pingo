@@ -11,6 +11,7 @@ const env_mod = @import("env.zig");
 const primitives = @import("primitives.zig");
 const eval_mod = @import("eval.zig");
 const expand = @import("expand.zig");
+const macro_mod = @import("macro.zig");
 
 const Datum = datum_mod.Datum;
 const Value = value_mod.Value;
@@ -191,6 +192,10 @@ pub const Machine = struct {
         // aborted mid-extent may have left the wind stack dirty (§2).
         m.wind.clearRetainingCapacity();
         m.diagnostic = null;
+        if (d == .pair and isForm(d.pair, "define-syntax")) {
+            try macro_mod.defineSyntax(m.arena, d.pair.cdr, m.global);
+            return .{ .value = .unspecified };
+        }
         if (d == .pair and isForm(d.pair, "define")) {
             const parts = try expand.defineParts(m.arena, d.pair.cdr);
             return m.run(parts.expr, m.global, parts.name);
@@ -360,7 +365,13 @@ pub const Machine = struct {
             .string => |s| return .{ .value = .{ .string = try m.arena.dupe(u8, s) } },
             .empty_list => return Error.BadSyntax,
             .symbol => |name| {
-                if (x.env.lookup(name)) |v| return .{ .value = v };
+                if (x.env.lookup(name)) |v| {
+                    if (v == .macro) { // a syntactic keyword is not a value (§2)
+                        m.diagnostic = .{ .context = name };
+                        return Error.BadSyntax;
+                    }
+                    return .{ .value = v };
+                }
                 m.diagnostic = .{ .context = name };
                 return Error.UnboundVariable;
             },
@@ -438,6 +449,12 @@ pub const Machine = struct {
                     return .{ .expr = .{ .d = try expand.expandAnd(m.arena, p.cdr), .env = x.env } };
                 if (isForm(p, "or"))
                     return .{ .expr = .{ .d = try expand.expandOr(m.arena, p.cdr), .env = x.env } };
+                if (isForm(p, "define-syntax")) return Error.BadSyntax; // top/body only (§2)
+
+                // Macro use (§2, tier 8I): a keyword bound in scope expands and
+                // re-evaluates. Core/derived forms above take precedence.
+                if (macro_mod.lookupMacro(x.d, x.env)) |mac|
+                    return .{ .expr = .{ .d = try macro_mod.expand(m.arena, mac, x.d), .env = x.env } };
 
                 // Application: validate the shape upfront, then evaluate the
                 // operator with an app frame waiting for it.
@@ -1617,6 +1634,12 @@ test "differential: machine and oracle agree on a form corpus" {
         "(define (f x) 1 (* x x)) (f 4)",
         "(define (7) 1)",
         "(define ((f)) 1)",
+        // syntax-rules fixed patterns (8I.2): both engines expand identically
+        "(define-syntax my-if (syntax-rules () ((_ c a b) (cond (c a) (else b))))) (my-if #f 1 2)",
+        "(define-syntax two (syntax-rules () ((_ a b) (list b a)))) (two 1 2)",
+        "(define-syntax k (syntax-rules () ((_) 42))) (k)",
+        "(define-syntax pick (syntax-rules (else) ((_ else x) x) ((_ y x) y))) (pick else 9)",
+        "(define-syntax only2 (syntax-rules () ((_ a b) (+ a b)))) (only2 1)",
         // internal defines (8H'.2): a body opening with defines is a letrec
         "((lambda () (define x 1) (define (f n) (if (= n 0) x (f (- n 1)))) (f 3)))",
         "(define (parity n) (define (e? k) (if (= k 0) #t (o? (- k 1)))) (define (o? k) (if (= k 0) #f (e? (- k 1)))) (e? n)) (parity 10)",

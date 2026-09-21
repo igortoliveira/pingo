@@ -68,6 +68,7 @@ fn writeValueDepth(v: Value, w: *std.Io.Writer, depth: usize) std.Io.Writer.Erro
         .capability => |c| try w.print("#<capability {s}>", .{c.name}),
         .pending => |p| try w.print("#<pending {s}>", .{p.capability.name}),
         .continuation => try w.writeAll("#<continuation>"),
+        .macro => try w.writeAll("#<macro>"),
         .vector => |items| {
             try w.writeAll("#(");
             for (items, 0..) |item, i| {
