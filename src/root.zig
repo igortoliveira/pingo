@@ -16,6 +16,7 @@ pub const limits = @import("limits.zig");
 pub const capability = @import("capability.zig");
 pub const machine = @import("machine.zig");
 pub const expand = @import("expand.zig");
+pub const trace = @import("trace.zig");
 
 test {
     std.testing.refAllDecls(@This());

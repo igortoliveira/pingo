@@ -47,18 +47,7 @@ fn parseTool(spec: []const u8) ?SimTool {
     const name = parts.next() orelse return null;
     if (name.len == 0) return null;
     const class_name = parts.next() orelse "independent";
-    const class: pingo.capability.EffectClass = if (std.mem.eql(u8, class_name, "pure"))
-        .pure
-    else if (std.mem.eql(u8, class_name, "independent"))
-        .external_independent
-    else if (std.mem.eql(u8, class_name, "resource"))
-        .resource_ordered
-    else if (std.mem.eql(u8, class_name, "ordered"))
-        .globally_ordered
-    else if (std.mem.eql(u8, class_name, "irreversible"))
-        .irreversible
-    else
-        return null;
+    const class = pingo.trace.classFromSpelling(class_name) orelse return null;
     const latency: u64 = if (parts.next()) |l| std.fmt.parseInt(u64, l, 10) catch return null else 100;
     return .{
         .cap = .{ .name = name, .class = class, .ctx = undefined, .handler = SimTool.handle },
@@ -67,7 +56,7 @@ fn parseTool(spec: []const u8) ?SimTool {
 }
 
 const usage =
-    \\usage: pingo [file.scm] [--tool name[:class[:latency_ms]]]... [--trace]
+    \\usage: pingo [file.scm] [--tool name[:class[:latency_ms]]]... [--trace] [--record file]
     \\  classes: pure | independent | resource | ordered | irreversible
     \\
 ;
@@ -82,10 +71,19 @@ pub fn main(init: std.process.Init) !void {
     var file_path: ?[]const u8 = null;
     var tools: std.ArrayList(SimTool) = .empty;
     var trace = false;
+    var record_path: ?[]const u8 = null;
     var i: usize = 1;
     while (i < args.len) : (i += 1) {
         if (std.mem.eql(u8, args[i], "--trace")) {
             trace = true;
+        } else if (std.mem.eql(u8, args[i], "--record")) {
+            i += 1;
+            if (i >= args.len) {
+                try out.writeAll(usage);
+                try out.flush();
+                return;
+            }
+            record_path = args[i];
         } else if (std.mem.eql(u8, args[i], "--tool")) {
             i += 1;
             const tool = if (i < args.len) parseTool(args[i]) else null;
@@ -105,7 +103,7 @@ pub fn main(init: std.process.Init) !void {
         }
     }
 
-    if (file_path) |path| return runFile(init, out, path, tools.items, trace);
+    if (file_path) |path| return runFile(init, out, path, tools.items, trace, record_path);
     return repl(init, out);
 }
 
@@ -113,7 +111,7 @@ pub fn main(init: std.process.Init) !void {
 /// Simulated tools complete on a virtual clock — the call with the earliest
 /// completion settles first — so the trace and the final report show real
 /// dispatch overlap without any real waiting.
-fn runFile(init: std.process.Init, out: *std.Io.Writer, path: []const u8, tools: []SimTool, trace: bool) !void {
+fn runFile(init: std.process.Init, out: *std.Io.Writer, path: []const u8, tools: []SimTool, trace: bool, record_path: ?[]const u8) !void {
     var session_arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer session_arena_state.deinit();
     var session_heap = pingo.limits.LimitedAllocator.init(session_arena_state.allocator(), repl_heap_bytes);
@@ -132,6 +130,22 @@ fn runFile(init: std.process.Init, out: *std.Io.Writer, path: []const u8, tools:
         tool.cap.ctx = tool; // final address: safe to register now
         try pingo.capability.register(machine.global, &tool.cap);
     }
+
+    // Recording taps the settle funnel (docs/host.md): headers now, one
+    // `(call ...)` line per settle below.
+    var record_buffer: [4096]u8 = undefined;
+    var record_writer: ?std.Io.File.Writer = null;
+    if (record_path) |rp| {
+        const f = std.Io.Dir.cwd().createFile(init.io, rp, .{}) catch |err| {
+            try out.print("cannot create {s}: {s}\n", .{ rp, @errorName(err) });
+            try out.flush();
+            std.process.exit(1);
+        };
+        record_writer = .init(f, init.io, &record_buffer);
+        for (tools) |*tool|
+            try pingo.trace.writeTool(&record_writer.?.interface, tool.cap.name, tool.cap.class, tool.latency_ms);
+    }
+    defer if (record_writer) |*rw| rw.file.close(init.io);
 
     const file = std.Io.Dir.cwd().openFile(init.io, path, .{}) catch |err| {
         try out.print("cannot open {s}: {s}\n", .{ path, @errorName(err) });
@@ -195,10 +209,14 @@ fn runFile(init: std.process.Init, out: *std.Io.Writer, path: []const u8, tools:
                     try pingo.printer.writeValue(result, out);
                     try out.writeByte('\n');
                 }
+                if (record_writer) |*rw|
+                    try pingo.trace.writeCall(&rw.interface, cap.name, chosen.p.args, result);
                 machine.resolve(chosen.p, result);
             } else |err| switch (err) {
                 error.HostError => {
                     if (trace) try out.print("[t={d:>5}ms] settle   {s} -> FAILED\n", .{ clock, cap.name });
+                    if (record_writer) |*rw|
+                        try pingo.trace.writeCall(&rw.interface, cap.name, chosen.p.args, null);
                     machine.resolveFailure(chosen.p);
                 },
                 error.OutOfMemory => return error.OutOfMemory,
@@ -223,6 +241,7 @@ fn runFile(init: std.process.Init, out: *std.Io.Writer, path: []const u8, tools:
             1.0;
         try out.print("virtual time: {d}ms | sequential sum: {d}ms | speedup: {d:.2}x\n", .{ clock, seq_sum, speedup });
     }
+    if (record_writer) |*rw| try rw.interface.flush();
     try out.flush();
     if (failed) std.process.exit(1);
 }
