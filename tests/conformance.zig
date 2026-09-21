@@ -165,6 +165,29 @@ fn check(
                     if (!try check(arena, body.pair.car, evaluator, bound)) return false;
                 return true;
             }
+            if (p.car == .symbol and std.mem.eql(u8, p.car.symbol, "let") and
+                p.cdr == .pair and p.cdr.pair.car == .symbol and p.cdr.pair.cdr == .pair)
+            {
+                // named let: the loop name and params are bound in the body;
+                // inits are checked in the outer scope
+                const before = bound.items.len;
+                defer bound.shrinkRetainingCapacity(before);
+                var bindings = p.cdr.pair.cdr.pair.car;
+                while (bindings == .pair) : (bindings = bindings.pair.cdr) {
+                    const binding = bindings.pair.car;
+                    if (binding != .pair or binding.pair.car != .symbol) return false;
+                    if (binding.pair.cdr == .pair)
+                        if (!try check(arena, binding.pair.cdr.pair.car, evaluator, bound)) return false;
+                }
+                try bound.append(arena, p.cdr.pair.car.symbol);
+                bindings = p.cdr.pair.cdr.pair.car;
+                while (bindings == .pair) : (bindings = bindings.pair.cdr)
+                    try bound.append(arena, bindings.pair.car.pair.car.symbol);
+                var body = p.cdr.pair.cdr.pair.cdr;
+                while (body == .pair) : (body = body.pair.cdr)
+                    if (!try check(arena, body.pair.car, evaluator, bound)) return false;
+                return true;
+            }
             if (p.car == .symbol and (std.mem.eql(u8, p.car.symbol, "let") or
                 std.mem.eql(u8, p.car.symbol, "let*")) and p.cdr == .pair)
             {

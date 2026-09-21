@@ -10,10 +10,13 @@ const Datum = datum_mod.Datum;
 pub const Error = error{ BadSyntax, OutOfMemory };
 
 /// `(let ((n e) ...) body ...)` → `((lambda (n ...) body ...) e ...)`.
+/// `(let name ((n e) ...) body ...)` →
+/// `(letrec ((name (lambda (n ...) body ...))) (name e ...))`.
 /// `form` is the datum after the `let` symbol. Distinct names and non-empty
 /// body are enforced by the lambda the expansion produces.
 pub fn expandLet(arena: std.mem.Allocator, form: Datum) Error!Datum {
     if (form != .pair) return error.BadSyntax;
+    if (form.pair.car == .symbol) return expandNamedLet(arena, form);
     var names: std.ArrayList(Datum) = .empty;
     defer names.deinit(arena);
     var exprs: std.ArrayList(Datum) = .empty;
@@ -36,6 +39,29 @@ pub fn expandLet(arena: std.mem.Allocator, form: Datum) Error!Datum {
         try datum_mod.cons(arena, try listFrom(arena, names.items), form.pair.cdr),
     );
     return try datum_mod.cons(arena, lambda_form, try listFrom(arena, exprs.items));
+}
+
+fn expandNamedLet(arena: std.mem.Allocator, form: Datum) Error!Datum {
+    // form = (name ((n e) ...) body ...)
+    const name = form.pair.car;
+    if (form.pair.cdr != .pair) return error.BadSyntax;
+    const b = try parseBindings(arena, form.pair.cdr.pair.car);
+    const body = form.pair.cdr.pair.cdr;
+
+    var params: Datum = .empty_list;
+    var i = b.names.len;
+    while (i > 0) {
+        i -= 1;
+        params = try datum_mod.cons(arena, try datum_mod.symbol(arena, b.names[i]), params);
+    }
+    const lambda_form = try datum_mod.cons(
+        arena,
+        try datum_mod.symbol(arena, "lambda"),
+        try datum_mod.cons(arena, params, body),
+    );
+    const binding = try listOf(arena, &.{try listOf(arena, &.{ name, lambda_form })});
+    const call = try datum_mod.cons(arena, name, try listFrom(arena, b.inits));
+    return try listOf(arena, &.{ try datum_mod.symbol(arena, "letrec"), binding, call });
 }
 
 /// `(let* ((n e) ...) body ...)` → nested `let`s, one binding each, so every
@@ -207,6 +233,14 @@ fn expectExpansion(expander: anytype, src: []const u8, expected: []const u8) !vo
 test "let expands to a lambda application" {
     try expectExpansion(expandLet, "(let ((x 1) (y 2)) (+ x y))", "((lambda (x y) (+ x y)) 1 2)");
     try expectExpansion(expandLet, "(let () 5)", "((lambda () 5))");
+}
+
+test "named let expands to letrec" {
+    try expectExpansion(
+        expandLet,
+        "(let loop ((n 3) (acc 1)) (if (= n 0) acc (loop (- n 1) (* acc n))))",
+        "(letrec ((loop (lambda (n acc) (if (= n 0) acc (loop (- n 1) (* acc n)))))) (loop 3 1))",
+    );
 }
 
 test "let* expands to nested lets" {

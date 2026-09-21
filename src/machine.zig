@@ -971,6 +971,10 @@ test "differential: machine and oracle agree on a form corpus" {
         "(letrec ((x 1) (y 2)) (+ x y))",
         "(letrec ((x 1) (x 2)) x)",
         "(letrec ((x 1)))",
+        // named let (8A.4): tail-recursive loop stays flat
+        "(let fact ((n 5) (acc 1)) (if (= n 0) acc (fact (- n 1) (* acc n))))",
+        "(let loop ((n 100000)) (if (= n 0) 'done (loop (- n 1))))",
+        "(let loop)",
         // cond/and/or (7.3): short-circuit means untaken positions may be unbound
         "(cond (#f 1) ((eq? 1 1) 'hit) (else 'miss))",
         "(cond (#f 1))",
