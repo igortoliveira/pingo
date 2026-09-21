@@ -677,6 +677,62 @@ test "only pure data crosses the boundary" {
     try std.testing.expectEqualStrings("send", s.evaluator.?.diagnostic.?.context);
 }
 
+/// Records every dispatched call as "<name>:<first-arg>" — the §6 observation
+/// sequence, seen from the host side.
+const RecordingHost = struct {
+    log: std.ArrayList(u8) = .empty,
+    gpa: std.mem.Allocator,
+
+    fn observe(ctx: *anyopaque, _: std.mem.Allocator, args: []const Value) capability_mod.HostError!Value {
+        const h: *RecordingHost = @ptrCast(@alignCast(ctx));
+        if (args.len != 1 or args[0] != .integer) return error.HostError;
+        h.log.print(h.gpa, "obs:{d} ", .{args[0].integer}) catch return error.OutOfMemory;
+        return args[0];
+    }
+
+    fn emit(ctx: *anyopaque, _: std.mem.Allocator, args: []const Value) capability_mod.HostError!Value {
+        const h: *RecordingHost = @ptrCast(@alignCast(ctx));
+        if (args.len != 1 or args[0] != .integer) return error.HostError;
+        h.log.print(h.gpa, "emit:{d} ", .{args[0].integer}) catch return error.OutOfMemory;
+        return .unspecified;
+    }
+};
+
+test "sequential dispatch order is program order (§6 observations)" {
+    var s = TestSession.init();
+    defer s.deinit();
+    _ = try s.run("1");
+
+    var host = RecordingHost{ .gpa = std.testing.allocator };
+    defer host.log.deinit(std.testing.allocator);
+    const obs = capability_mod.Capability{ .name = "obs", .class = .external_independent, .ctx = &host, .handler = RecordingHost.observe };
+    const emit = capability_mod.Capability{ .name = "emit", .class = .irreversible, .ctx = &host, .handler = RecordingHost.emit };
+    try capability_mod.register(s.evaluator.?.global, &obs);
+    try capability_mod.register(s.evaluator.?.global, &emit);
+
+    // Mixed effect classes through begin, if, and nested applications: the v0
+    // sequential runtime must dispatch in program order.
+    _ = try s.run("(begin (emit 1) (if (eq? (obs 2) 2) (emit 3) (emit 99)) (obs (+ (obs 4) 1)))");
+    try std.testing.expectEqualStrings("emit:1 obs:2 emit:3 obs:4 obs:5 ", host.log.items);
+}
+
+test "a failing call stops later dispatches (§6: stop-on-error order)" {
+    var s = TestSession.init();
+    defer s.deinit();
+    _ = try s.run("1");
+
+    var host = RecordingHost{ .gpa = std.testing.allocator };
+    defer host.log.deinit(std.testing.allocator);
+    const emit = capability_mod.Capability{ .name = "emit", .class = .irreversible, .ctx = &host, .handler = RecordingHost.emit };
+    try capability_mod.register(s.evaluator.?.global, &emit);
+
+    try std.testing.expectError(error.DivideByZero, s.run("(begin (emit 1) (/ 1 0) (emit 2))"));
+    try std.testing.expectEqualStrings("emit:1 ", host.log.items);
+    // and the session remains usable with the same capability
+    _ = try s.run("(emit 3)");
+    try std.testing.expectEqualStrings("emit:1 emit:3 ", host.log.items);
+}
+
 test "tail calls do not grow the stack" {
     var s = TestSession.init();
     defer s.deinit();
