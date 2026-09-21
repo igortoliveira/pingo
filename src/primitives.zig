@@ -24,7 +24,61 @@ const table = [_]Value.Primitive{
     .{ .name = "null?", .func = isNull },
     .{ .name = "pair?", .func = isPair },
     .{ .name = "eq?", .func = eq },
+    // list stores like cons does, so it is equally non-strict (§4).
+    .{ .name = "list", .func = list, .strict_args = false },
+    .{ .name = "append", .func = append },
+    .{ .name = "length", .func = length },
+    .{ .name = "not", .func = not },
 };
+
+fn list(arena: std.mem.Allocator, args: []const Value) PrimitiveError!Value {
+    var result: Value = .empty_list;
+    var i = args.len;
+    while (i > 0) {
+        i -= 1;
+        const p = try arena.create(Value.Pair);
+        p.* = .{ .car = args[i], .cdr = result };
+        result = .{ .pair = p };
+    }
+    return result;
+}
+
+fn append(arena: std.mem.Allocator, args: []const Value) PrimitiveError!Value {
+    if (args.len == 0) return .empty_list;
+    var result = args[args.len - 1]; // tail is shared, per R5RS
+    var i = args.len - 1;
+    while (i > 0) {
+        i -= 1;
+        // copy the spine of args[i], splicing `result` as its tail
+        var items: std.ArrayList(Value) = .empty;
+        defer items.deinit(arena);
+        var rest = args[i];
+        while (rest == .pair) : (rest = rest.pair.cdr) try items.append(arena, rest.pair.car);
+        if (rest != .empty_list) return error.TypeError; // proper lists only
+        var j = items.items.len;
+        while (j > 0) {
+            j -= 1;
+            const p = try arena.create(Value.Pair);
+            p.* = .{ .car = items.items[j], .cdr = result };
+            result = .{ .pair = p };
+        }
+    }
+    return result;
+}
+
+fn length(_: std.mem.Allocator, args: []const Value) PrimitiveError!Value {
+    try exactly(args, 1);
+    var n: i64 = 0;
+    var rest = args[0];
+    while (rest == .pair) : (rest = rest.pair.cdr) n += 1;
+    if (rest != .empty_list) return error.TypeError;
+    return .{ .integer = n };
+}
+
+fn not(_: std.mem.Allocator, args: []const Value) PrimitiveError!Value {
+    try exactly(args, 1);
+    return .{ .boolean = !value_mod.isTruthy(args[0]) };
+}
 
 fn exactly(args: []const Value, n: usize) PrimitiveError!void {
     if (args.len != n) return error.ArityMismatch;

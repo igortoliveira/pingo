@@ -942,6 +942,16 @@ test "differential: machine and oracle agree on a form corpus" {
         "(or #f #f)",
         "(let ((t 5)) (or #f t))",
         "(cond (else 1) (2 3))",
+        // list primitives II (7.4)
+        "(list 1 (+ 1 1) 'three)",
+        "(list)",
+        "(append '(1 2) '(3) '() '(4 5))",
+        "(append)",
+        "(append '(1) 2)",
+        "(length '(a b c))",
+        "(length 5)",
+        "(not #f)",
+        "(not 0)",
     };
 
     for (corpus) |src| {
