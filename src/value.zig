@@ -51,9 +51,22 @@ pub const Value = union(enum) {
     /// transformer layout belongs to `macro.zig`; opaque here.
     /// `docs/syntax-rules.md`.
     macro: *Macro,
+    /// An I/O port (tier 8J). A string port is pure guest state; a host port
+    /// is capability-backed (§4). Compared by identity; not pure data.
+    /// `docs/io.md`.
+    port: *Port,
 
     pub const Continuation = opaque {};
     pub const Macro = opaque {};
+
+    /// A string port: an output accumulation buffer, or an input cursor over a
+    /// source string. Host ports arrive with `current-output-port` (8J.4).
+    pub const Port = struct {
+        input: bool,
+        out: std.ArrayListUnmanaged(u8) = .empty,
+        src: []const u8 = "",
+        cursor: usize = 0,
+    };
 
     pub const Pair = struct { car: Value, cdr: Value };
 
@@ -122,7 +135,7 @@ fn isPureDataInner(v0: Value, depth: usize, budget: *usize) bool {
                     if (!isPureDataInner(item, depth + 1, budget)) return false;
                 return true;
             },
-            .closure, .primitive, .capability, .continuation, .macro => return false,
+            .closure, .primitive, .capability, .continuation, .macro, .port => return false,
             // Deep force substitutes resolved pendings before this check runs.
             .pending => return false,
         }

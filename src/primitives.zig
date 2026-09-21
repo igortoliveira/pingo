@@ -135,6 +135,16 @@ const table = [_]Value.Primitive{
     .{ .name = "string->number", .func = stringToNumber },
     .{ .name = "boolean?", .func = isBoolean },
     .{ .name = "procedure?", .func = isProcedure },
+    // I/O: string output ports (tier 8J.2). Pure guest state, no authority.
+    .{ .name = "open-output-string", .func = openOutputString },
+    .{ .name = "get-output-string", .func = getOutputString },
+    .{ .name = "write-char", .func = writeCharPort },
+    .{ .name = "write-string", .func = writeStringPort },
+    .{ .name = "write", .func = writePort },
+    .{ .name = "display", .func = displayPort },
+    .{ .name = "newline", .func = newlinePort },
+    .{ .name = "port?", .func = isPort },
+    .{ .name = "output-port?", .func = isOutputPort },
     .{ .name = "vector?", .func = isVector },
     .{ .name = "make-vector", .func = makeVector },
     // like list/cons, vector only stores — pendings may flow in (§4)
@@ -247,6 +257,79 @@ fn isProcedure(_: std.mem.Allocator, args: []const Value) PrimitiveError!Value {
         .closure, .primitive, .capability, .continuation => true,
         else => false,
     } };
+}
+
+// -- I/O: string output ports (tier 8J.2) ---------------------------------
+
+fn asOutputPort(v: Value) PrimitiveError!*Value.Port {
+    if (v != .port or v.port.input) return error.TypeError;
+    return v.port;
+}
+
+fn openOutputString(arena: std.mem.Allocator, args: []const Value) PrimitiveError!Value {
+    try exactly(args, 0);
+    const p = try arena.create(Value.Port);
+    p.* = .{ .input = false };
+    return .{ .port = p };
+}
+
+fn getOutputString(arena: std.mem.Allocator, args: []const Value) PrimitiveError!Value {
+    try exactly(args, 1);
+    const p = try asOutputPort(args[0]);
+    return .{ .string = try arena.dupe(u8, p.out.items) };
+}
+
+/// Appends the rendered `v` (write or display form) to the port's buffer.
+fn emitValue(arena: std.mem.Allocator, port: *Value.Port, v: Value, display: bool) PrimitiveError!void {
+    var buf = std.Io.Writer.Allocating.init(arena);
+    defer buf.deinit();
+    if (display) printer_mod.displayValue(v, &buf.writer) catch return error.OutOfMemory else printer_mod.writeValue(v, &buf.writer) catch return error.OutOfMemory;
+    try port.out.appendSlice(arena, buf.written());
+}
+
+fn writeCharPort(arena: std.mem.Allocator, args: []const Value) PrimitiveError!Value {
+    try exactly(args, 2);
+    const c = try asChar(args[0]);
+    const p = try asOutputPort(args[1]);
+    try p.out.append(arena, c);
+    return .unspecified;
+}
+
+fn writeStringPort(arena: std.mem.Allocator, args: []const Value) PrimitiveError!Value {
+    try exactly(args, 2);
+    const s = try asString(args[0]);
+    const p = try asOutputPort(args[1]);
+    try p.out.appendSlice(arena, s);
+    return .unspecified;
+}
+
+fn writePort(arena: std.mem.Allocator, args: []const Value) PrimitiveError!Value {
+    try exactly(args, 2);
+    try emitValue(arena, try asOutputPort(args[1]), args[0], false);
+    return .unspecified;
+}
+
+fn displayPort(arena: std.mem.Allocator, args: []const Value) PrimitiveError!Value {
+    try exactly(args, 2);
+    try emitValue(arena, try asOutputPort(args[1]), args[0], true);
+    return .unspecified;
+}
+
+fn newlinePort(arena: std.mem.Allocator, args: []const Value) PrimitiveError!Value {
+    try exactly(args, 1);
+    const p = try asOutputPort(args[0]);
+    try p.out.append(arena, '\n');
+    return .unspecified;
+}
+
+fn isPort(_: std.mem.Allocator, args: []const Value) PrimitiveError!Value {
+    try exactly(args, 1);
+    return .{ .boolean = args[0] == .port };
+}
+
+fn isOutputPort(_: std.mem.Allocator, args: []const Value) PrimitiveError!Value {
+    try exactly(args, 1);
+    return .{ .boolean = args[0] == .port and !args[0].port.input };
 }
 
 fn symbolToString(arena: std.mem.Allocator, args: []const Value) PrimitiveError!Value {
@@ -1043,6 +1126,7 @@ pub fn eqValues(a: Value, b: Value) bool {
         .pending => a.pending == b.pending,
         .continuation => a.continuation == b.continuation,
         .macro => a.macro == b.macro,
+        .port => a.port == b.port,
         .vector => a.vector.ptr == b.vector.ptr and a.vector.len == b.vector.len,
     };
 }

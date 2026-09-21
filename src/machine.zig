@@ -1674,6 +1674,11 @@ test "differential: machine and oracle agree on a form corpus" {
         // custom ellipsis + escape (8I.6)
         "(let-syntax ((foo (syntax-rules ::: () ((foo ... args :::) (args ::: ...))))) (foo 3 - 5))",
         "(define-syntax lit (syntax-rules () ((_) (quote (a (... ...) b))))) (lit)",
+        // string output ports (8J.2)
+        "(call-with-output-string (lambda (p) (write \"hi\" p) (display \"hi\" p)))",
+        "(call-with-output-string (lambda (p) (display (list 1 2 3) p)))",
+        "(let ((p (open-output-string))) (write-char #\\x p) (newline p) (get-output-string p))",
+        "(list (port? (open-output-string)) (output-port? (open-output-string)) (port? 5))",
         // internal defines (8H'.2): a body opening with defines is a letrec
         "((lambda () (define x 1) (define (f n) (if (= n 0) x (f (- n 1)))) (f 3)))",
         "(define (parity n) (define (e? k) (if (= k 0) #t (o? (- k 1)))) (define (o? k) (if (= k 0) #f (e? (- k 1)))) (e? n)) (parity 10)",

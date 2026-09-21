@@ -49,18 +49,24 @@ const Value = value_mod.Value;
 /// Cycle-safe (§1): the spine is capped and the car side depth-capped; the
 /// printer truncates with an ellipsis rather than diverging.
 pub fn writeValue(v: Value, w: *std.Io.Writer) std.Io.Writer.Error!void {
-    return writeValueDepth(v, w, 0);
+    return writeValueDepth(v, w, 0, false);
 }
 
-fn writeValueDepth(v: Value, w: *std.Io.Writer, depth: usize) std.Io.Writer.Error!void {
+/// `display` semantics (§8J): strings print unquoted and chars raw; everything
+/// else is as `write`. Recurses into aggregates in display mode.
+pub fn displayValue(v: Value, w: *std.Io.Writer) std.Io.Writer.Error!void {
+    return writeValueDepth(v, w, 0, true);
+}
+
+fn writeValueDepth(v: Value, w: *std.Io.Writer, depth: usize, display: bool) std.Io.Writer.Error!void {
     if (depth > 200) return w.writeAll("...");
     switch (v) {
         .integer => |n| try w.print("{d}", .{n}),
         .real => |x| try writeReal(x, w),
-        .char => |c| try writeChar(c, w),
+        .char => |c| if (display) try w.writeByte(c) else try writeChar(c, w),
         .boolean => |b| try w.writeAll(if (b) "#t" else "#f"),
         .symbol => |s| try w.writeAll(s),
-        .string => |s| try writeString(s, w),
+        .string => |s| if (display) try w.writeAll(s) else try writeString(s, w),
         .empty_list => try w.writeAll("()"),
         .unspecified => try w.writeAll("#<unspecified>"),
         .closure => try w.writeAll("#<procedure>"),
@@ -69,29 +75,30 @@ fn writeValueDepth(v: Value, w: *std.Io.Writer, depth: usize) std.Io.Writer.Erro
         .pending => |p| try w.print("#<pending {s}>", .{p.capability.name}),
         .continuation => try w.writeAll("#<continuation>"),
         .macro => try w.writeAll("#<macro>"),
+        .port => |p| try w.writeAll(if (p.input) "#<input-port>" else "#<output-port>"),
         .vector => |items| {
             try w.writeAll("#(");
             for (items, 0..) |item, i| {
                 if (i > 0) try w.writeByte(' ');
                 if (i > 10_000) return w.writeAll(" ...)");
-                try writeValueDepth(item, w, depth + 1);
+                try writeValueDepth(item, w, depth + 1, display);
             }
             try w.writeByte(')');
         },
         .pair => |p| {
             try w.writeByte('(');
-            try writeValueDepth(p.car, w, depth + 1);
+            try writeValueDepth(p.car, w, depth + 1, display);
             var rest = p.cdr;
             var spine: usize = 0;
             while (rest == .pair) : (rest = rest.pair.cdr) {
                 spine += 1;
                 if (spine > 10_000) return w.writeAll(" ...)");
                 try w.writeByte(' ');
-                try writeValueDepth(rest.pair.car, w, depth + 1);
+                try writeValueDepth(rest.pair.car, w, depth + 1, display);
             }
             if (rest != .empty_list) {
                 try w.writeAll(" . ");
-                try writeValueDepth(rest, w, depth + 1);
+                try writeValueDepth(rest, w, depth + 1, display);
             }
             try w.writeByte(')');
         },

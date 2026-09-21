@@ -157,3 +157,9 @@
 ;; withdrawn here and reintroduced natively in the next commit.
 
 (define call-with-current-continuation call/cc)
+
+;; string output ports (S8J.2): build a string with an output port.
+(define (call-with-output-string proc)
+  (let ((port (open-output-string)))
+    (proc port)
+    (get-output-string port)))
