@@ -13,6 +13,11 @@ pub fn main(init: std.process.Init) !void {
     var stdout_writer: std.Io.File.Writer = .init(.stdout(), init.io, &stdout_buffer);
     const out = &stdout_writer.interface;
 
+    var session_arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer session_arena_state.deinit();
+    const session_arena = session_arena_state.allocator();
+    var evaluator = try pingo.eval.Evaluator.init(session_arena);
+
     while (true) {
         try out.writeAll("pingo> ");
         try out.flush();
@@ -26,17 +31,26 @@ pub fn main(init: std.process.Init) !void {
             error.ReadFailed => return err,
         } orelse break; // end of input
 
-        var arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-        defer arena_state.deinit();
-        var reader = pingo.reader.Reader.init(arena_state.allocator(), line, max_read_depth);
+        // Session arena: definitions and closure bodies must outlive the
+        // line that read them, so datums are read into the same arena.
+        var reader = pingo.reader.Reader.init(session_arena, line, max_read_depth);
 
         while (true) {
             const d = reader.read() catch |err| {
                 try out.print("read error: {s}\n", .{@errorName(err)});
                 break;
             } orelse break;
-            try pingo.printer.write(d, out);
-            try out.writeByte('\n');
+            const v = evaluator.evalToplevel(d) catch |err| {
+                try out.print("error: {s}", .{pingo.eval.kindOf(err)});
+                if (evaluator.diagnostic) |diag|
+                    try out.print(" ({s})", .{diag.context});
+                try out.writeByte('\n');
+                continue;
+            };
+            if (v != .unspecified) {
+                try pingo.printer.writeValue(v, out);
+                try out.writeByte('\n');
+            }
         }
     }
     try out.flush();
