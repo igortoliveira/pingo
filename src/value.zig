@@ -51,6 +51,11 @@ pub const Value = union(enum) {
     };
 };
 
+/// Semantics §2: only #f is false.
+pub fn isTruthy(v: Value) bool {
+    return !(v == .boolean and !v.boolean);
+}
+
 /// Deep-converts a reader Datum into a Value, copying bytes so the Value's
 /// lifetime is independent of the Datum's arena.
 pub fn fromDatum(arena: std.mem.Allocator, d: datum_mod.Datum) std.mem.Allocator.Error!Value {

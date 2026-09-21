@@ -26,9 +26,13 @@ const Control = union(enum) {
 
 const Expr = struct { d: Datum, env: *Env };
 
-/// One suspended context; grows in 6.3–6.5 (branch, sequence, application).
+/// One suspended context; the application frame lands in 6.5.
 const Frame = union(enum) {
-    halt, // never stored; keeps the union non-empty until 6.3 adds real frames
+    /// After the condition of (if c t [e]): pick a branch from the value.
+    branch: struct { then: Datum, alt: ?Datum, env: *Env },
+    /// A begin/body sequence: discard the arrived value, evaluate `rest`
+    /// (invariant: a proper, non-empty list — validated before pushing).
+    seq: struct { rest: Datum, env: *Env },
 };
 
 pub const Machine = struct {
@@ -83,17 +87,53 @@ pub const Machine = struct {
                     return .{ .value = try value_mod.fromDatum(m.arena, p.cdr.pair.car) };
                 }
                 if (isForm(p, "define")) return Error.BadSyntax; // top level only (§2)
-                return Error.Unsupported; // forms and applications land in 6.3–6.5
+                if (isForm(p, "if")) {
+                    // (if c t) or (if c t e), same shape rules as the oracle.
+                    const c = p.cdr;
+                    if (c != .pair or c.pair.cdr != .pair) return Error.BadSyntax;
+                    const t = c.pair.cdr.pair;
+                    var alt: ?Datum = null;
+                    switch (t.cdr) {
+                        .empty_list => {},
+                        .pair => |a| {
+                            if (a.cdr != .empty_list) return Error.BadSyntax;
+                            alt = a.car;
+                        },
+                        else => return Error.BadSyntax,
+                    }
+                    try m.frames.append(m.arena, .{ .branch = .{ .then = t.car, .alt = alt, .env = x.env } });
+                    return .{ .expr = .{ .d = c.pair.car, .env = x.env } };
+                }
+                if (isForm(p, "begin")) {
+                    if (p.cdr != .pair) return Error.BadSyntax;
+                    var check = p.cdr;
+                    while (check == .pair) : (check = check.pair.cdr) {}
+                    if (check != .empty_list) return Error.BadSyntax;
+                    return m.enterSequence(p.cdr, x.env);
+                }
+                return Error.Unsupported; // lambda and applications land in 6.4–6.5
             },
         }
     }
 
+    /// Evaluates the head of a validated non-empty sequence; the tail element
+    /// pushes no frame (proper tail calls, §5).
+    fn enterSequence(m: *Machine, seq: Datum, env: *Env) Error!Control {
+        if (seq.pair.cdr == .pair)
+            try m.frames.append(m.arena, .{ .seq = .{ .rest = seq.pair.cdr, .env = env } });
+        return .{ .expr = .{ .d = seq.pair.car, .env = env } };
+    }
+
     /// One step of "a value arrived at the innermost frame".
     fn stepFrame(m: *Machine, v: Value) Error!Control {
-        _ = v;
         const frame = m.frames.pop().?;
         switch (frame) {
-            .halt => unreachable,
+            .branch => |b| {
+                if (value_mod.isTruthy(v)) return .{ .expr = .{ .d = b.then, .env = b.env } };
+                if (b.alt) |a| return .{ .expr = .{ .d = a, .env = b.env } };
+                return .{ .value = .unspecified };
+            },
+            .seq => |s| return m.enterSequence(s.rest, s.env),
         }
     }
 
@@ -157,6 +197,29 @@ test "machine: quote and variables" {
     try std.testing.expect((try t.run("+")) == .primitive);
     try std.testing.expectError(error.UnboundVariable, t.run("nope"));
     try std.testing.expectEqualStrings("nope", t.machine.?.diagnostic.?.context);
+}
+
+test "machine: if" {
+    var t = TestMachine.init();
+    defer t.deinit();
+    try std.testing.expectEqual(@as(i64, 1), (try t.run("(if #t 1 2)")).integer);
+    try std.testing.expectEqual(@as(i64, 2), (try t.run("(if #f 1 2)")).integer);
+    try std.testing.expectEqual(@as(i64, 1), (try t.run("(if #t 1 boom)")).integer);
+    try std.testing.expectEqual(@as(i64, 1), (try t.run("(if 0 1 2)")).integer); // only #f is false
+    try std.testing.expectEqual(Value.unspecified, try t.run("(if #f 1)"));
+    try std.testing.expectError(error.BadSyntax, t.run("(if #t)"));
+    try std.testing.expectError(error.BadSyntax, t.run("(if #t 1 2 3)"));
+}
+
+test "machine: begin" {
+    var t = TestMachine.init();
+    defer t.deinit();
+    try std.testing.expectEqual(@as(i64, 3), (try t.run("(begin 1 2 3)")).integer);
+    try std.testing.expectEqual(@as(i64, 1), (try t.run("(begin 1)")).integer);
+    try std.testing.expectError(error.BadSyntax, t.run("(begin)"));
+    try std.testing.expectError(error.UnboundVariable, t.run("(begin boom 2)"));
+    // nested control through frames
+    try std.testing.expectEqual(@as(i64, 5), (try t.run("(begin 1 (if #f 4 (begin 2 5)))")).integer);
 }
 
 test "machine: syntax errors and fuel" {
