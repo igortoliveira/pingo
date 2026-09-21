@@ -1327,6 +1327,10 @@ test "differential: machine and oracle agree on a form corpus" {
         "(call-with-values (lambda () (values)) (lambda () 'none))",
         "(call-with-values (lambda () 5) (lambda (x) (* x 2)))",
         "(call-with-values (lambda () (values 1 2)) (lambda (x) x))",
+        // dynamic-wind (8H'.6): plain sequencing pre-call/cc
+        "(define order '()) (define (add s) (set! order (cons s order))) (dynamic-wind (lambda () (add 'a)) (lambda () (add 'b) 'r) (lambda () (add 'c))) (reverse order)",
+        "(dynamic-wind (lambda () 1) (lambda () 2) (lambda () 3))",
+        "(dynamic-wind (lambda () 1) (lambda () 2))",
         // rest args (8F'.4)
         "((lambda args args) 1 2 3)",
         "((lambda args args))",

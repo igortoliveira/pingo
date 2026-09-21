@@ -151,3 +151,12 @@
     (if (and (vector? v) (= (vector-length v) 2) (eq? (vector-ref v 0) '%values))
         (apply consumer (vector-ref v 1))
         (consumer v))))
+
+;; dynamic-wind (S2 dynamic-wind): plain sequencing until call/cc exists —
+;; no control transfer can enter or leave the extent, and an abort (S3)
+;; never runs after-thunks. The call/cc design doc must revisit this.
+(define (dynamic-wind before thunk after)
+  (before)
+  (let ((result (thunk)))
+    (after)
+    result))
