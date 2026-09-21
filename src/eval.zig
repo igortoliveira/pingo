@@ -82,6 +82,8 @@ pub const Evaluator = struct {
     limits: Limits,
     fuel_used: u64 = 0,
     depth: usize = 0,
+    /// Session-monotonic mark counter for macro hygiene renames (tier 8I.4).
+    macro_counter: u64 = 0,
     /// Set alongside the returned error when there is useful context.
     diagnostic: ?Diagnostic = null,
 
@@ -174,6 +176,13 @@ pub const Evaluator = struct {
                     return Error.UnboundVariable;
                 },
                 .pair => |p| {
+                    // Hygiene (§8I.4): rewrite a macro-introduced alias whose
+                    // underlying identifier is a syntactic keyword back to that
+                    // keyword so the form cascade recognizes it.
+                    if (p.car == .symbol) if (macro_mod.unwrapKeyword(scope, p.car.symbol)) |kw| {
+                        d = try datum_mod.cons(e.arena, .{ .symbol = kw }, p.cdr);
+                        continue;
+                    };
                     if (isForm(p, "quote")) {
                         if (p.cdr != .pair or p.cdr.pair.cdr != .empty_list) return Error.BadSyntax;
                         return try value_mod.fromDatum(e.arena, p.cdr.pair.car);
@@ -292,7 +301,7 @@ pub const Evaluator = struct {
                     // Macro use (§2, tier 8I): a keyword bound in scope expands
                     // and re-evaluates. Core/derived forms above take precedence.
                     if (macro_mod.lookupMacro(d, scope)) |mac| {
-                        d = try macro_mod.expand(e.arena, mac, d);
+                        d = try macro_mod.expand(e.arena, mac, d, &e.macro_counter);
                         continue;
                     }
 

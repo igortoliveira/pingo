@@ -141,6 +141,8 @@ pub const Machine = struct {
     /// continuation snapshots this alongside the frames; invoking one runs
     /// the afters/befores that differ from the live stack.
     wind: std.ArrayList(*WindEntry) = .empty,
+    /// Session-monotonic mark counter for macro hygiene renames (tier 8I.4).
+    macro_counter: u64 = 0,
 
     pub fn init(arena: std.mem.Allocator, limits: Limits) std.mem.Allocator.Error!Machine {
         const global = try Env.init(arena, null);
@@ -376,6 +378,13 @@ pub const Machine = struct {
                 return Error.UnboundVariable;
             },
             .pair => |p| {
+                // Hygiene (§8I.4): a macro-introduced alias whose underlying
+                // identifier is a syntactic keyword is rewritten to that
+                // keyword so the form cascade recognizes it.
+                if (p.car == .symbol) if (macro_mod.unwrapKeyword(x.env, p.car.symbol)) |kw| {
+                    const head = try datum_mod.cons(m.arena, .{ .symbol = kw }, p.cdr);
+                    return .{ .expr = .{ .d = head, .env = x.env } };
+                };
                 if (isForm(p, "quote")) {
                     if (p.cdr != .pair or p.cdr.pair.cdr != .empty_list) return Error.BadSyntax;
                     return .{ .value = try value_mod.fromDatum(m.arena, p.cdr.pair.car) };
@@ -454,7 +463,7 @@ pub const Machine = struct {
                 // Macro use (§2, tier 8I): a keyword bound in scope expands and
                 // re-evaluates. Core/derived forms above take precedence.
                 if (macro_mod.lookupMacro(x.d, x.env)) |mac|
-                    return .{ .expr = .{ .d = try macro_mod.expand(m.arena, mac, x.d), .env = x.env } };
+                    return .{ .expr = .{ .d = try macro_mod.expand(m.arena, mac, x.d, &m.macro_counter), .env = x.env } };
 
                 // Application: validate the shape upfront, then evaluate the
                 // operator with an app frame waiting for it.
@@ -1646,6 +1655,9 @@ test "differential: machine and oracle agree on a form corpus" {
         "(define-syntax mlet (syntax-rules () ((_ ((n v) ...) b ...) ((lambda (n ...) b ...) v ...)))) (mlet ((a 1) (b 2)) (+ a b))",
         "(define-syntax lastf (syntax-rules () ((_ a r ... z) (list z r ... a)))) (lastf 1 2 3 4 5)",
         "(define-syntax nn (syntax-rules () ((_ (a ...) ...) (list (list a ...) ...)))) (nn (1 2) (3) ())",
+        // hygiene (8I.4): introduced tmp does not capture; quoted data literal
+        "(define-syntax sw (syntax-rules () ((_ a b) (let ((tmp a)) (set! a b) (set! b tmp))))) (define p 1) (define tmp 2) (sw p tmp) (list p tmp)",
+        "(define-syntax tq (syntax-rules () ((_) 'lit))) (tq)",
         // internal defines (8H'.2): a body opening with defines is a letrec
         "((lambda () (define x 1) (define (f n) (if (= n 0) x (f (- n 1)))) (f 3)))",
         "(define (parity n) (define (e? k) (if (= k 0) #t (o? (- k 1)))) (define (o? k) (if (= k 0) #f (e? (- k 1)))) (e? n)) (parity 10)",

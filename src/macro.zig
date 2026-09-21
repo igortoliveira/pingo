@@ -3,9 +3,11 @@
 //! `(keyword . args)` form through `expand` here at their form-dispatch point,
 //! so the matcher never forks between machine and oracle.
 //!
-//! 8I.2 scope: fixed patterns (no ellipsis), literals, `_`, dotted patterns.
-//! Transcription is **non-hygienic** — hygiene (renaming + def_env resolver)
-//! lands in 8I.4.
+//! Hygiene (8I.4): every template identifier that is not a pattern variable
+//! and not a syntactic keyword is renamed to a per-expansion alias registered
+//! against the macro's definition scope (`Env.registerAlias`). Introduced
+//! binders then can't capture, and free references stay transparent — resolved
+//! at use time through `Env.lookup`'s alias fallback.
 
 const std = @import("std");
 const datum_mod = @import("datum.zig");
@@ -18,9 +20,42 @@ pub const Error = error{ BadSyntax, OutOfMemory };
 
 pub const Rule = struct { pattern: Datum, template: Datum };
 
-/// A parsed `syntax-rules` transformer. `def_env` is recorded for hygiene
-/// obligation (b), unused until 8I.4. `ellipsis` is the ellipsis identifier
-/// (custom ellipsis is 8I.6; "..." until then).
+/// Syntactic keywords never renamed by hygiene: core forms, derived forms,
+/// and contextual keywords interpreted by name in the expanders (`else`,
+/// `=>`, quasiquote parts). Everything else in a template is either a pattern
+/// variable (substituted) or an introduced identifier (renamed).
+const keywords = [_][]const u8{
+    "quote",      "if",             "define",         "lambda",
+    "begin",      "set!",           "let",            "let*",
+    "letrec",     "cond",           "case",           "and",
+    "or",         "do",             "delay",          "quasiquote",
+    "unquote",    "unquote-splicing", "define-syntax", "let-syntax",
+    "letrec-syntax", "else",        "=>",
+};
+
+fn isKeyword(name: []const u8) bool {
+    for (keywords) |k| if (std.mem.eql(u8, k, name)) return true;
+    return false;
+}
+
+/// If `name` is a macro alias whose underlying identifier is a syntactic
+/// keyword, returns that keyword name so form dispatch can recognize it;
+/// otherwise null (plain keywords need no rewrite; non-keyword aliases stay
+/// aliases and resolve as values). Chases alias chains.
+pub fn unwrapKeyword(env: *const env_mod.Env, name: []const u8) ?[]const u8 {
+    var cur = name;
+    var chased = false;
+    while (env.aliasOf(cur)) |ai| {
+        cur = ai.original;
+        chased = true;
+    }
+    if (!chased) return null;
+    return if (isKeyword(cur)) cur else null;
+}
+
+/// A parsed `syntax-rules` transformer. `def_env` is the scope the macro was
+/// defined in (hygiene b). `ellipsis` is the ellipsis identifier (custom
+/// ellipsis is 8I.6; "..." until then).
 pub const Macro = struct {
     literals: []const []const u8,
     rules: []const Rule,
@@ -132,17 +167,44 @@ fn collectVars(arena: std.mem.Allocator, m: *const Macro, pat: Datum, out: *std.
     }
 }
 
+/// Transcription context: the macro, the per-expansion rename map
+/// (original → alias), and the session mark counter for fresh aliases.
+const Ctx = struct {
+    arena: std.mem.Allocator,
+    m: *const Macro,
+    renames: *std.StringHashMapUnmanaged([]const u8),
+    counter: *u64,
+};
+
 /// Expands one macro use. `form` is the whole `(keyword . args)`. Tries each
-/// rule in order; the first matching pattern transcribes.
-pub fn expand(arena: std.mem.Allocator, m: *const Macro, form: Datum) Error!Datum {
+/// rule in order; the first matching pattern transcribes. `counter` supplies
+/// fresh hygiene marks (session-monotonic).
+pub fn expand(arena: std.mem.Allocator, m: *const Macro, form: Datum, counter: *u64) Error!Datum {
     for (m.rules) |rule| {
         var binds: Bindings = .empty;
         defer binds.deinit(arena);
         // The keyword slot (pattern car / form car) is ignored in matching.
-        if (try match(arena, m, rule.pattern.pair.cdr, form.pair.cdr, &binds))
-            return transcribe(arena, m, rule.template, &binds);
+        if (try match(arena, m, rule.pattern.pair.cdr, form.pair.cdr, &binds)) {
+            var renames: std.StringHashMapUnmanaged([]const u8) = .empty;
+            defer renames.deinit(arena);
+            var ctx = Ctx{ .arena = arena, .m = m, .renames = &renames, .counter = counter };
+            return transcribe(&ctx, rule.template, &binds, false);
+        }
     }
     return error.BadSyntax; // no rule matched
+}
+
+/// Renames an introduced identifier (§8I.4): pattern-substituted names and
+/// keywords are left alone by the caller; everything else gets a per-expansion
+/// alias registered against the macro's def scope. The alias spelling starts
+/// with a space, so the reader can never produce it.
+fn renameIntroduced(ctx: *Ctx, name: []const u8) Error!Datum {
+    if (ctx.renames.get(name)) |alias| return .{ .symbol = alias };
+    const alias = try std.fmt.allocPrint(ctx.arena, " {s}%{d}", .{ name, ctx.counter.* });
+    ctx.counter.* += 1;
+    try ctx.renames.put(ctx.arena, try ctx.arena.dupe(u8, name), alias);
+    try ctx.m.def_env.registerAlias(alias, name, ctx.m.def_env);
+    return .{ .symbol = alias };
 }
 
 /// Matches `pat` against `inp`, binding pattern variables into `binds`.
@@ -296,16 +358,56 @@ test "syntax-rules ellipsis (oracle)" {
     try std.testing.expectError(error.BadSyntax, s.run("(bad 1 2)"));
 }
 
-/// Copies `tmpl`, substituting pattern variables and expanding ellipses.
-/// Non-hygienic (renaming lands in 8I.4).
-fn transcribe(arena: std.mem.Allocator, m: *const Macro, tmpl: Datum, binds: *Bindings) Error!Datum {
+test "syntax-rules hygiene (oracle)" {
+    var s = eval_mod.TestSession.init();
+    defer s.deinit();
+
+    // (a) an introduced binder does not capture a user identifier
+    _ = try s.run("(define-syntax swap! (syntax-rules () ((_ a b) (let ((tmp a)) (set! a b) (set! b tmp)))))");
+    _ = try s.run("(define x 1)");
+    _ = try s.run("(define tmp 2)");
+    _ = try s.run("(swap! x tmp)");
+    try std.testing.expectEqual(@as(i64, 2), (try s.run("x")).integer);
+    try std.testing.expectEqual(@as(i64, 1), (try s.run("tmp")).integer);
+
+    // (b) a template's free reference stays bound to the definition scope
+    // even when the use site shadows the name
+    _ = try s.run("(define-syntax wrap (syntax-rules () ((_ a) (list a a))))");
+    const w = try s.run("(let ((list (lambda (a b) 'hijacked))) (wrap 9))");
+    try std.testing.expectEqual(@as(i64, 9), w.pair.car.integer);
+
+    // forward reference: a template calls a helper defined after the macro
+    _ = try s.run("(define-syntax callh (syntax-rules () ((_) (helper))))");
+    _ = try s.run("(define (helper) 'ok)");
+    try std.testing.expectEqualStrings("ok", (try s.run("(callh)")).symbol);
+
+    // quoted data is never renamed
+    _ = try s.run("(define-syntax tagq (syntax-rules () ((_) 'lit)))");
+    try std.testing.expectEqualStrings("lit", (try s.run("(tagq)")).symbol);
+}
+
+/// Copies `tmpl`, substituting pattern variables, expanding ellipses, and
+/// renaming introduced identifiers for hygiene (§8I.4). In `data` mode (inside
+/// a template `quote`) pattern vars and ellipses still apply, but literal
+/// identifiers are left as data — never renamed.
+fn transcribe(ctx: *Ctx, tmpl: Datum, binds: *Bindings, data: bool) Error!Datum {
+    const arena = ctx.arena;
+    const m = ctx.m;
     switch (tmpl) {
         .symbol => |name| {
-            const b = binds.get(name) orelse return tmpl;
-            if (b != .single) return error.BadSyntax; // used with too few ellipses
-            return b.single;
+            if (binds.get(name)) |b| {
+                if (b != .single) return error.BadSyntax; // used with too few ellipses
+                return b.single;
+            }
+            if (data or isKeyword(name) or std.mem.eql(u8, name, "_") or isEllipsis(m, tmpl))
+                return tmpl; // quoted data, keywords, and the ellipsis pass through
+            return renameIntroduced(ctx, name); // introduced identifier
         },
         .pair => |p| {
+            // A template `(quote x)`: transcribe x as data (no renaming).
+            if (!data and p.car == .symbol and std.mem.eql(u8, p.car.symbol, "quote") and
+                p.cdr == .pair)
+                return datum_mod.cons(arena, p.car, try transcribe(ctx, p.cdr, binds, true));
             // `sub ... rest`: expand sub once per matched element, then rest.
             if (p.cdr == .pair and isEllipsis(m, p.cdr.pair.car)) {
                 var depth: usize = 1;
@@ -313,16 +415,16 @@ fn transcribe(arena: std.mem.Allocator, m: *const Macro, tmpl: Datum, binds: *Bi
                 while (after == .pair and isEllipsis(m, after.pair.car)) : (after = after.pair.cdr) depth += 1;
                 var expanded: std.ArrayList(Datum) = .empty;
                 defer expanded.deinit(arena);
-                try expandEllipsis(arena, m, p.car, binds, depth, &expanded);
-                var rest = try transcribe(arena, m, after, binds);
+                try expandEllipsis(ctx, p.car, binds, depth, &expanded, data);
+                var rest = try transcribe(ctx, after, binds, data);
                 var i = expanded.items.len;
                 while (i > 0) : (i -= 1) rest = try datum_mod.cons(arena, expanded.items[i - 1], rest);
                 return rest;
             }
             return datum_mod.cons(
                 arena,
-                try transcribe(arena, m, p.car, binds),
-                try transcribe(arena, m, p.cdr, binds),
+                try transcribe(ctx, p.car, binds, data),
+                try transcribe(ctx, p.cdr, binds, data),
             );
         },
         .vector => |items| {
@@ -330,7 +432,7 @@ fn transcribe(arena: std.mem.Allocator, m: *const Macro, tmpl: Datum, binds: *Bi
             var lst: Datum = .empty_list;
             var i = items.len;
             while (i > 0) : (i -= 1) lst = try datum_mod.cons(arena, items[i - 1], lst);
-            const out_lst = try transcribe(arena, m, lst, binds);
+            const out_lst = try transcribe(ctx, lst, binds, data);
             var out: std.ArrayList(Datum) = .empty;
             defer out.deinit(arena);
             var node = out_lst;
@@ -343,7 +445,9 @@ fn transcribe(arena: std.mem.Allocator, m: *const Macro, tmpl: Datum, binds: *Bi
 
 /// Expands `sub ...` (`depth` ellipses) into `out`. Controlling variables are
 /// the pattern vars in `sub` bound to a `seq`; all must share a length.
-fn expandEllipsis(arena: std.mem.Allocator, m: *const Macro, sub: Datum, binds: *Bindings, depth: usize, out: *std.ArrayList(Datum)) Error!void {
+fn expandEllipsis(ctx: *Ctx, sub: Datum, binds: *Bindings, depth: usize, out: *std.ArrayList(Datum), data: bool) Error!void {
+    const arena = ctx.arena;
+    const m = ctx.m;
     var vars: std.ArrayList([]const u8) = .empty;
     defer vars.deinit(arena);
     try collectVars(arena, m, sub, &vars);
@@ -374,8 +478,8 @@ fn expandEllipsis(arena: std.mem.Allocator, m: *const Macro, sub: Datum, binds: 
                 try sub_binds.put(arena, name, entry.value_ptr.*);
         }
         if (depth > 1)
-            try expandEllipsis(arena, m, sub, &sub_binds, depth - 1, out)
+            try expandEllipsis(ctx, sub, &sub_binds, depth - 1, out, data)
         else
-            try out.append(arena, try transcribe(arena, m, sub, &sub_binds));
+            try out.append(arena, try transcribe(ctx, sub, &sub_binds, data));
     }
 }
