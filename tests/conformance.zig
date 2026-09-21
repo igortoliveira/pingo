@@ -45,11 +45,11 @@ pub fn main(init: std.process.Init) !void {
             continue;
         }
 
-        const expected = evaluator.evalToplevel(t.expected) catch {
+        const expected = evaluator.runToCompletion(t.expected) catch {
             skip += 1; // the *expectation* itself needs unsupported semantics
             continue;
         };
-        const actual = evaluator.evalToplevel(t.expr) catch |err| {
+        const actual = evaluator.runToCompletion(t.expr) catch |err| {
             fail += 1;
             try out.print("FAIL (error {s}): {s}\n", .{ pingo.eval.kindOf(err), form_src });
             continue;

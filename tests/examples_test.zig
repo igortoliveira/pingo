@@ -50,7 +50,7 @@ fn runProgram(src: []const u8, host: *StubHost, caps: []pingo.capability.Capabil
 
     var r = pingo.reader.Reader.init(arena, src, 32);
     var last: Value = .unspecified;
-    while (try r.read()) |d| last = try evaluator.evalToplevel(d);
+    while (try r.read()) |d| last = try evaluator.runToCompletion(d);
     // Values referencing the arena die here; callers only inspect the tag.
     return switch (last) {
         .string => .{ .string = "" },

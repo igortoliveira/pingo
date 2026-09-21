@@ -74,7 +74,7 @@ pub fn main(init: std.process.Init) !void {
                 try out.print("read error: {s}\n", .{@errorName(err)});
                 break;
             } orelse break;
-            const v = evaluator.evalToplevel(d) catch |err| {
+            const v = evaluator.runToCompletion(d) catch |err| {
                 try out.print("error: {s}", .{pingo.eval.kindOf(err)});
                 if (evaluator.diagnostic) |diag|
                     try out.print(" ({s})", .{diag.context});

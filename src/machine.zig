@@ -19,9 +19,23 @@ pub const Error = eval_mod.Error;
 pub const Limits = eval_mod.Limits;
 pub const Diagnostic = eval_mod.Diagnostic;
 
+/// A capability call handed to the host (semantics §4): args are already
+/// evaluated and pure-data-checked. The machine stays alive, waiting for
+/// `resumeWithValue`/`resumeWithError`.
+pub const Suspension = struct {
+    capability: *const capability_mod.Capability,
+    args: []const Value,
+};
+
+pub const Outcome = union(enum) {
+    value: Value,
+    suspended: Suspension,
+};
+
 const Control = union(enum) {
     expr: Expr,
     value: Value,
+    suspend_request: Suspension,
 };
 
 const Expr = struct { d: Datum, env: *Env };
@@ -50,6 +64,9 @@ pub const Machine = struct {
     fuel_used: u64 = 0,
     diagnostic: ?Diagnostic = null,
     frames: std.ArrayList(Frame) = .empty,
+    control: Control = .{ .value = .unspecified },
+    /// Set while a suspension is outstanding; guards the host protocol.
+    suspended_on: ?*const capability_mod.Capability = null,
 
     pub fn init(arena: std.mem.Allocator, limits: Limits) std.mem.Allocator.Error!Machine {
         const global = try Env.init(arena, null);
@@ -57,7 +74,8 @@ pub const Machine = struct {
         return .{ .arena = arena, .global = global, .limits = limits };
     }
 
-    pub fn evalToplevel(m: *Machine, d: Datum) Error!Value {
+    pub fn evalToplevel(m: *Machine, d: Datum) Error!Outcome {
+        std.debug.assert(m.suspended_on == null); // host protocol: resume first
         m.diagnostic = null;
         if (d == .pair and isForm(d.pair, "define")) {
             const args = d.pair.cdr;
@@ -69,18 +87,69 @@ pub const Machine = struct {
         return m.run(d, m.global, null);
     }
 
-    fn run(m: *Machine, d0: Datum, env0: *Env, define_name: ?[]const u8) Error!Value {
+    /// Host resumes the outstanding call with its result value.
+    pub fn resumeWithValue(m: *Machine, v: Value) Error!Outcome {
+        std.debug.assert(m.suspended_on != null); // host protocol: nothing to resume
+        const cap = m.suspended_on.?;
+        m.suspended_on = null;
+        if (!value_mod.isPureData(v)) {
+            m.diagnostic = .{ .context = cap.name };
+            return Error.HostError; // misbehaving host handler (§4)
+        }
+        m.control = .{ .value = v };
+        return m.loop();
+    }
+
+    /// Host resolves the outstanding call as a failure; the evaluation aborts
+    /// with host-error (§3). Returns the error for the caller to propagate.
+    pub fn resumeWithError(m: *Machine) Error {
+        std.debug.assert(m.suspended_on != null);
+        m.diagnostic = .{ .context = m.suspended_on.?.name };
+        m.suspended_on = null;
+        return Error.HostError;
+    }
+
+    /// Synchronous-host adapter: services each suspension with the
+    /// capability's own registered handler.
+    pub fn runToCompletion(m: *Machine, d: Datum) Error!Value {
+        var outcome = try m.evalToplevel(d);
+        while (true) {
+            switch (outcome) {
+                .value => |v| return v,
+                .suspended => |s| {
+                    const result = s.capability.handler(s.capability.ctx, m.arena, s.args) catch |err| switch (err) {
+                        error.HostError => return m.resumeWithError(),
+                        error.OutOfMemory => {
+                            m.suspended_on = null;
+                            return Error.OutOfMemory;
+                        },
+                    };
+                    outcome = try m.resumeWithValue(result);
+                },
+            }
+        }
+    }
+
+    fn run(m: *Machine, d0: Datum, env0: *Env, define_name: ?[]const u8) Error!Outcome {
         m.frames.clearRetainingCapacity();
         if (define_name) |name|
             try m.pushFrame(.{ .define = .{ .name = name } });
-        var control: Control = .{ .expr = .{ .d = d0, .env = env0 } };
+        m.control = .{ .expr = .{ .d = d0, .env = env0 } };
+        return m.loop();
+    }
+
+    fn loop(m: *Machine) Error!Outcome {
         while (true) {
             try m.chargeFuel();
-            switch (control) {
-                .expr => |x| control = try m.stepExpr(x),
+            switch (m.control) {
+                .expr => |x| m.control = try m.stepExpr(x),
                 .value => |v| {
-                    if (m.frames.items.len == 0) return v;
-                    control = try m.stepFrame(v);
+                    if (m.frames.items.len == 0) return .{ .value = v };
+                    m.control = try m.stepFrame(v);
+                },
+                .suspend_request => |s| {
+                    m.suspended_on = s.capability;
+                    return .{ .suspended = s };
                 },
             }
         }
@@ -209,25 +278,14 @@ pub const Machine = struct {
                 return .{ .value = result };
             },
             .capability => |c| {
-                // §4: only pure data crosses the boundary, in either direction.
+                // §4: only pure data crosses the boundary (guest side; the
+                // host side is checked at resume).
                 for (args) |a| if (!value_mod.isPureData(a)) {
                     m.diagnostic = .{ .context = c.name };
                     return Error.TypeError;
                 };
-                // Still the synchronous v0 realization; detachable suspension
-                // replaces this call in stage 2.
-                const result = c.handler(c.ctx, m.arena, args) catch |err| {
-                    m.diagnostic = .{ .context = c.name };
-                    return switch (err) {
-                        error.HostError => Error.HostError,
-                        error.OutOfMemory => Error.OutOfMemory,
-                    };
-                };
-                if (!value_mod.isPureData(result)) {
-                    m.diagnostic = .{ .context = c.name };
-                    return Error.HostError; // misbehaving host handler
-                }
-                return .{ .value = result };
+                // Detachable suspension: stop and hand the call to the host.
+                return .{ .suspend_request = .{ .capability = c, .args = args } };
             },
             else => return Error.NotAProcedure,
         }
@@ -279,7 +337,7 @@ pub const TestMachine = struct {
         t.machine.?.arena = arena;
         var r = reader_mod.Reader.init(arena, src, 32);
         var last: Value = .unspecified;
-        while (try r.read()) |d| last = try t.machine.?.evalToplevel(d);
+        while (try r.read()) |d| last = try t.machine.?.runToCompletion(d);
         return last;
     }
 };
@@ -428,6 +486,85 @@ test "machine: capability dispatch with §4 boundary checks" {
     try std.testing.expectError(error.TypeError, t.run("(double (lambda (x) x))"));
     try std.testing.expectError(error.HostError, t.run("(double 'nan)"));
     try std.testing.expectEqualStrings("double", t.machine.?.diagnostic.?.context);
+}
+
+fn readOne(arena: std.mem.Allocator, src: []const u8) !Datum {
+    var r = reader_mod.Reader.init(arena, src, 32);
+    return (try r.read()).?;
+}
+
+fn nopHandler(_: *anyopaque, _: std.mem.Allocator, _: []const Value) capability_mod.HostError!Value {
+    return .unspecified; // manual suspend/resume tests never invoke handlers
+}
+
+test "machine: suspension hands the call to the host and resumes mid-expression" {
+    var t = TestMachine.init();
+    defer t.deinit();
+    _ = try t.run("1");
+    const arena = t.arena_state.allocator();
+    const m = &t.machine.?;
+
+    var dummy: u8 = 0;
+    const cap = capability_mod.Capability{
+        .name = "ask",
+        .class = .external_independent,
+        .ctx = &dummy,
+        .handler = nopHandler,
+    };
+    try capability_mod.register(m.global, &cap);
+
+    // Suspends in the middle of an application; machine state carries the
+    // surrounding computation.
+    const outcome = try m.evalToplevel(try readOne(arena, "(+ 1 (ask 3) 100)"));
+    try std.testing.expect(outcome == .suspended);
+    try std.testing.expectEqualStrings("ask", outcome.suspended.capability.name);
+    try std.testing.expectEqual(@as(i64, 3), outcome.suspended.args[0].integer);
+
+    const done = try m.resumeWithValue(.{ .integer = 6 });
+    try std.testing.expectEqual(@as(i64, 107), done.value.integer);
+}
+
+test "machine: suspension survives define and nested control" {
+    var t = TestMachine.init();
+    defer t.deinit();
+    _ = try t.run("1");
+    const arena = t.arena_state.allocator();
+    const m = &t.machine.?;
+
+    var dummy: u8 = 0;
+    const cap = capability_mod.Capability{ .name = "ask", .class = .globally_ordered, .ctx = &dummy, .handler = nopHandler };
+    try capability_mod.register(m.global, &cap);
+
+    const outcome = try m.evalToplevel(try readOne(arena, "(define x (if #t (begin 1 (ask 'q)) 9))"));
+    try std.testing.expect(outcome == .suspended);
+    _ = try m.resumeWithValue(.{ .integer = 55 });
+    try std.testing.expectEqual(@as(i64, 55), (try t.run("x")).integer);
+}
+
+test "machine: resume with error and with impure value" {
+    var t = TestMachine.init();
+    defer t.deinit();
+    _ = try t.run("1");
+    const arena = t.arena_state.allocator();
+    const m = &t.machine.?;
+
+    var dummy: u8 = 0;
+    const cap = capability_mod.Capability{ .name = "ask", .class = .globally_ordered, .ctx = &dummy, .handler = nopHandler };
+    try capability_mod.register(m.global, &cap);
+
+    var outcome = try m.evalToplevel(try readOne(arena, "(ask 1)"));
+    try std.testing.expect(outcome == .suspended);
+    try std.testing.expectEqual(m.resumeWithError(), error.HostError);
+    try std.testing.expectEqualStrings("ask", m.diagnostic.?.context);
+
+    // session usable again; resuming with a procedure is a host fault
+    outcome = try m.evalToplevel(try readOne(arena, "(ask 2)"));
+    try std.testing.expect(outcome == .suspended);
+    const proc = m.global.lookup("+").?;
+    try std.testing.expectError(error.HostError, m.resumeWithValue(proc));
+
+    // and still usable after that
+    try std.testing.expectEqual(@as(i64, 2), (try t.run("(+ 1 1)")).integer);
 }
 
 test "differential: machine and oracle agree on a form corpus" {
