@@ -35,6 +35,12 @@ const Frame = union(enum) {
     seq: struct { rest: Datum, env: *Env },
     /// Toplevel (define name _): bind the arrived value globally (§2).
     define: struct { name: []const u8 },
+    /// An application evaluated left-to-right (one of §2's valid orders):
+    /// the arrived value joins `collected` ([0] is the operator); `remaining`
+    /// holds operand datums still to evaluate (invariant: a proper list).
+    app: struct { remaining: Datum, env: *Env, collected: std.ArrayList(Value) },
+    /// Rest of a closure body (invariant: non-empty slice).
+    body: struct { rest: []const Datum, env: *Env },
 };
 
 pub const Machine = struct {
@@ -124,7 +130,18 @@ pub const Machine = struct {
                 }
                 if (isForm(p, "lambda"))
                     return .{ .value = try value_mod.makeClosure(m.arena, p.cdr, x.env) };
-                return Error.Unsupported; // applications land in 6.5
+
+                // Application: validate the shape upfront, then evaluate the
+                // operator with an app frame waiting for it.
+                var check = p.cdr;
+                while (check == .pair) : (check = check.pair.cdr) {}
+                if (check != .empty_list) return Error.BadSyntax;
+                try m.frames.append(m.arena, .{ .app = .{
+                    .remaining = p.cdr,
+                    .env = x.env,
+                    .collected = .empty,
+                } });
+                return .{ .expr = .{ .d = p.car, .env = x.env } };
             },
         }
     }
@@ -151,6 +168,47 @@ pub const Machine = struct {
                 try m.global.define(def.name, v);
                 return .{ .value = .unspecified };
             },
+            .app => |popped| {
+                var app = popped;
+                try app.collected.append(m.arena, v);
+                if (app.remaining == .pair) {
+                    const next = app.remaining.pair.car;
+                    app.remaining = app.remaining.pair.cdr;
+                    try m.frames.append(m.arena, .{ .app = app });
+                    return .{ .expr = .{ .d = next, .env = app.env } };
+                }
+                return m.applyCollected(app.collected.items);
+            },
+            .body => |b| {
+                if (b.rest.len == 1) // tail position: push nothing
+                    return .{ .expr = .{ .d = b.rest[0], .env = b.env } };
+                try m.frames.append(m.arena, .{ .body = .{ .rest = b.rest[1..], .env = b.env } });
+                return .{ .expr = .{ .d = b.rest[0], .env = b.env } };
+            },
+        }
+    }
+
+    fn applyCollected(m: *Machine, collected: []const Value) Error!Control {
+        const op = collected[0];
+        const args = collected[1..];
+        switch (op) {
+            .closure => |c| {
+                if (args.len != c.params.len) return Error.ArityMismatch;
+                const child = try Env.init(m.arena, c.env);
+                for (c.params, args) |name, arg| try child.define(name, arg);
+                if (c.body.len == 1) // tail position: push nothing
+                    return .{ .expr = .{ .d = c.body[0], .env = child } };
+                try m.frames.append(m.arena, .{ .body = .{ .rest = c.body[1..], .env = child } });
+                return .{ .expr = .{ .d = c.body[0], .env = child } };
+            },
+            .primitive => |p| {
+                const result = p.func(m.arena, args) catch |err| {
+                    m.diagnostic = .{ .context = p.name };
+                    return err;
+                };
+                return .{ .value = result };
+            },
+            else => return Error.NotAProcedure, // capabilities land in 6.6
         }
     }
 
@@ -263,6 +321,38 @@ test "machine: define and lambda shape errors" {
     // a define whose expression errors binds nothing
     try std.testing.expectError(error.UnboundVariable, t.run("(define w boom)"));
     try std.testing.expectError(error.UnboundVariable, t.run("w"));
+}
+
+test "machine: applications and primitives" {
+    var t = TestMachine.init();
+    defer t.deinit();
+    try std.testing.expectEqual(@as(i64, 6), (try t.run("(+ 1 2 3)")).integer);
+    try std.testing.expectEqual(@as(i64, 8), (try t.run("((lambda (x) (+ x x)) 4)")).integer);
+    try std.testing.expectEqual(@as(i64, 3), (try t.run("((lambda (f a b) (f a b)) + 1 2)")).integer);
+    try std.testing.expectEqual(@as(i64, 2), (try t.run("(car (cdr '(1 2)))")).integer);
+    try std.testing.expectError(error.NotAProcedure, t.run("(1 2)"));
+    try std.testing.expectError(error.ArityMismatch, t.run("((lambda (x) x))"));
+    try std.testing.expectError(error.DivideByZero, t.run("(/ 1 0)"));
+    try std.testing.expectEqualStrings("/", t.machine.?.diagnostic.?.context);
+}
+
+test "machine: recursion and lexical capture" {
+    var t = TestMachine.init();
+    defer t.deinit();
+    _ = try t.run("(define fact (lambda (n) (if (eq? n 0) 1 (* n (fact (- n 1))))))");
+    try std.testing.expectEqual(@as(i64, 3628800), (try t.run("(fact 10)")).integer);
+
+    _ = try t.run("(define k (lambda (x) (lambda () x)))");
+    try std.testing.expectEqual(@as(i64, 3), (try t.run("((k 3))")).integer);
+}
+
+test "machine: tail calls keep the frame stack flat" {
+    var t = TestMachine.init();
+    defer t.deinit();
+    _ = try t.run("(define loop (lambda (n) (if (eq? n 0) 'done (loop (- n 1)))))");
+    try std.testing.expectEqualStrings("done", (try t.run("(loop 100000)")).symbol);
+    // 100k tail iterations never grew the stack: capacity stays tiny.
+    try std.testing.expect(t.machine.?.frames.capacity < 64);
 }
 
 test "machine: syntax errors and fuel" {
