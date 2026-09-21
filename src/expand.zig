@@ -371,6 +371,50 @@ pub fn defineParts(arena: std.mem.Allocator, form: Datum) Error!DefineParts {
     }
 }
 
+fn isDefineForm(d: Datum) bool {
+    return d == .pair and d.pair.car == .symbol and
+        std.mem.eql(u8, d.pair.car.symbol, "define");
+}
+
+/// Internal defines (§2): a body spine opening with `(define ...)` forms
+/// rewrites to a single `letrec` over the rest of the body. Returns the spine
+/// unchanged when there are no leading defines. A `define` after the first
+/// expression, or a body of only definitions, is `BadSyntax` — checked
+/// eagerly here. Shared by closure creation and both engines' `letrec`.
+pub fn rewriteBody(arena: std.mem.Allocator, body: Datum) Error!Datum {
+    var bindings: std.ArrayList(Datum) = .empty;
+    defer bindings.deinit(arena);
+
+    var rest = body;
+    while (rest == .pair and isDefineForm(rest.pair.car)) : (rest = rest.pair.cdr) {
+        const parts = try defineParts(arena, rest.pair.car.pair.cdr);
+        const name = try datum_mod.symbol(arena, parts.name);
+        try bindings.append(arena, try datum_mod.cons(
+            arena,
+            name,
+            try datum_mod.cons(arena, parts.expr, .empty_list),
+        ));
+    }
+    var scan = rest;
+    while (scan == .pair) : (scan = scan.pair.cdr)
+        if (isDefineForm(scan.pair.car)) return error.BadSyntax;
+    if (bindings.items.len == 0) return body;
+    if (rest != .pair) return error.BadSyntax; // only definitions
+
+    var binding_list: Datum = .empty_list;
+    var i = bindings.items.len;
+    while (i > 0) {
+        i -= 1;
+        binding_list = try datum_mod.cons(arena, bindings.items[i], binding_list);
+    }
+    const letrec_form = try datum_mod.cons(
+        arena,
+        try datum_mod.symbol(arena, "letrec"),
+        try datum_mod.cons(arena, binding_list, rest),
+    );
+    return datum_mod.cons(arena, letrec_form, .empty_list);
+}
+
 /// Parsed `((n e) ...)` binding list; names are distinct symbols. Shared by
 /// both engines' native `letrec` (§2 "Derived forms II").
 pub const Bindings = struct {

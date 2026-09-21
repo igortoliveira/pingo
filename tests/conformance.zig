@@ -67,7 +67,7 @@ pub fn main(init: std.process.Init) !void {
     if (fail > 0) std.process.exit(1);
     // Regression floor: raise this whenever new features convert skips to
     // passes; a drop means a feature silently stopped being recognized.
-    const pass_floor = 173;
+    const pass_floor = 174;
     if (pass < pass_floor) {
         std.debug.print("conformance: pass count {d} fell below the floor {d}\n", .{ pass, pass_floor });
         std.process.exit(1);
@@ -129,6 +129,27 @@ fn allSymbolsSupported(arena: std.mem.Allocator, d: Datum, evaluator: *pingo.mac
     var bound: std.ArrayList([]const u8) = .empty;
     defer bound.deinit(arena);
     return check(arena, d, evaluator, &bound) catch false;
+}
+
+/// Internal defines (§2): names defined at the start of a body are in scope
+/// for the whole body (letrec semantics), so bind them before checking it.
+fn bindBodyDefines(
+    arena: std.mem.Allocator,
+    body: Datum,
+    bound: *std.ArrayList([]const u8),
+) std.mem.Allocator.Error!void {
+    var b = body;
+    while (b == .pair) : (b = b.pair.cdr) {
+        const form = b.pair.car;
+        if (form != .pair or form.pair.car != .symbol or
+            !std.mem.eql(u8, form.pair.car.symbol, "define") or form.pair.cdr != .pair) break;
+        const target = form.pair.cdr.pair.car;
+        if (target == .symbol) {
+            try bound.append(arena, target.symbol);
+        } else if (target == .pair and target.pair.car == .symbol) {
+            try bound.append(arena, target.pair.car.symbol);
+        }
+    }
 }
 
 fn check(
@@ -204,6 +225,7 @@ fn check(
                         if (!try check(arena, binding.pair.cdr.pair.car, evaluator, bound)) return false;
                 }
                 var body = p.cdr.pair.cdr;
+                try bindBodyDefines(arena, body, bound);
                 while (body == .pair) : (body = body.pair.cdr)
                     if (!try check(arena, body.pair.car, evaluator, bound)) return false;
                 return true;
@@ -227,6 +249,7 @@ fn check(
                 while (bindings == .pair) : (bindings = bindings.pair.cdr)
                     try bound.append(arena, bindings.pair.car.pair.car.symbol);
                 var body = p.cdr.pair.cdr.pair.cdr;
+                try bindBodyDefines(arena, body, bound);
                 while (body == .pair) : (body = body.pair.cdr)
                     if (!try check(arena, body.pair.car, evaluator, bound)) return false;
                 return true;
@@ -255,6 +278,7 @@ fn check(
                 }
                 for (names.items) |n| try bound.append(arena, n);
                 var body = p.cdr.pair.cdr;
+                try bindBodyDefines(arena, body, bound);
                 while (body == .pair) : (body = body.pair.cdr)
                     if (!try check(arena, body.pair.car, evaluator, bound)) return false;
                 return true;
@@ -269,6 +293,31 @@ fn check(
                 }
                 if (params == .symbol) try bound.append(arena, params.symbol);
                 var body = p.cdr.pair.cdr;
+                try bindBodyDefines(arena, body, bound);
+                while (body == .pair) : (body = body.pair.cdr)
+                    if (!try check(arena, body.pair.car, evaluator, bound)) return false;
+                return true;
+            }
+            if (p.car == .symbol and std.mem.eql(u8, p.car.symbol, "define") and p.cdr == .pair) {
+                // Internal define: the defined name is bound at body level by
+                // bindBodyDefines; here check the init, with the shorthand's
+                // formals bound like a lambda's.
+                const target = p.cdr.pair.car;
+                if (target == .symbol) {
+                    if (p.cdr.pair.cdr != .pair) return false;
+                    return check(arena, p.cdr.pair.cdr.pair.car, evaluator, bound);
+                }
+                if (target != .pair) return false;
+                const before = bound.items.len;
+                defer bound.shrinkRetainingCapacity(before);
+                var params = target.pair.cdr;
+                while (params == .pair) : (params = params.pair.cdr) {
+                    if (params.pair.car != .symbol) return false;
+                    try bound.append(arena, params.pair.car.symbol);
+                }
+                if (params == .symbol) try bound.append(arena, params.symbol);
+                var body = p.cdr.pair.cdr;
+                try bindBodyDefines(arena, body, bound);
                 while (body == .pair) : (body = body.pair.cdr)
                     if (!try check(arena, body.pair.car, evaluator, bound)) return false;
                 return true;

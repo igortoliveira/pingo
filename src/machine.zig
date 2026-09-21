@@ -356,10 +356,11 @@ pub const Machine = struct {
                     return .{ .expr = .{ .d = try expand.expandDo(m.arena, p.cdr), .env = x.env } };
                 if (isForm(p, "letrec")) {
                     if (p.cdr != .pair) return Error.BadSyntax;
-                    const body = p.cdr.pair.cdr;
+                    var body = p.cdr.pair.cdr;
                     var check = body;
                     while (check == .pair) : (check = check.pair.cdr) {}
                     if (body != .pair or check != .empty_list) return Error.BadSyntax;
+                    body = try expand.rewriteBody(m.arena, body); // internal defines (§2)
                     const b = try expand.parseBindings(m.arena, p.cdr.pair.car);
                     const child = try Env.init(m.arena, x.env);
                     for (b.names) |name| try child.define(name, .unspecified);
@@ -1301,6 +1302,15 @@ test "differential: machine and oracle agree on a form corpus" {
         "(define (f x) 1 (* x x)) (f 4)",
         "(define (7) 1)",
         "(define ((f)) 1)",
+        // internal defines (8H'.2): a body opening with defines is a letrec
+        "((lambda () (define x 1) (define (f n) (if (= n 0) x (f (- n 1)))) (f 3)))",
+        "(define (parity n) (define (e? k) (if (= k 0) #t (o? (- k 1)))) (define (o? k) (if (= k 0) #f (e? (- k 1)))) (e? n)) (parity 10)",
+        "(let ((x 1)) (define y (+ x 1)) (* x y))",
+        "(letrec ((a 1)) (define b (+ a 1)) (+ a b))",
+        "(let loop ((n 2)) (define n2 (* n n)) (if (= n 0) 'done (loop (- n 1))) n2)",
+        "((lambda () (define x 1)))",
+        "((lambda () 1 (define x 2)))",
+        "((lambda () (define x 1) (define x 2) x))",
         // rest args (8F'.4)
         "((lambda args args) 1 2 3)",
         "((lambda args args))",

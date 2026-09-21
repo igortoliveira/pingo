@@ -10,6 +10,7 @@ const std = @import("std");
 const datum_mod = @import("datum.zig");
 const env_mod = @import("env.zig");
 const capability_mod = @import("capability.zig");
+const expand_mod = @import("expand.zig");
 
 /// Errors a primitive may raise; a subset of the evaluator's error set
 /// (defined here so value.zig doesn't depend on eval.zig).
@@ -151,7 +152,8 @@ pub fn makeClosure(
 
     var body: std.ArrayList(datum_mod.Datum) = .empty;
     defer body.deinit(arena);
-    var b = form.pair.cdr;
+    // Internal defines (§2): a body opening with defines becomes one letrec.
+    var b = try expand_mod.rewriteBody(arena, form.pair.cdr);
     while (b == .pair) : (b = b.pair.cdr) try body.append(arena, b.pair.car);
     if (b != .empty_list or body.items.len == 0) return error.BadSyntax;
 

@@ -229,6 +229,7 @@ pub const Evaluator = struct {
                         var check = body;
                         while (check == .pair) : (check = check.pair.cdr) {}
                         if (body != .pair or check != .empty_list) return Error.BadSyntax;
+                        body = try expand.rewriteBody(e.arena, body); // internal defines (§2)
                         const b = try expand.parseBindings(e.arena, p.cdr.pair.car);
                         const child = try Env.init(e.arena, scope);
                         for (b.names) |name| try child.define(name, .unspecified);
