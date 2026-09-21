@@ -106,7 +106,101 @@ const table = [_]Value.Primitive{
     .{ .name = "string->number", .func = stringToNumber },
     .{ .name = "boolean?", .func = isBoolean },
     .{ .name = "procedure?", .func = isProcedure },
+    .{ .name = "vector?", .func = isVector },
+    .{ .name = "make-vector", .func = makeVector },
+    // like list/cons, vector only stores — pendings may flow in (§4)
+    .{ .name = "vector", .func = vectorOfArgs, .strict_args = false },
+    .{ .name = "vector-length", .func = vectorLength },
+    .{ .name = "vector-ref", .func = vectorRef },
+    .{ .name = "vector-set!", .func = vectorSet },
+    .{ .name = "vector->list", .func = vectorToList },
+    .{ .name = "list->vector", .func = listToVector },
+    .{ .name = "vector-fill!", .func = vectorFill },
 };
+
+fn asVector(v: Value) PrimitiveError![]Value {
+    return if (v == .vector) v.vector else error.TypeError;
+}
+
+fn isVector(_: std.mem.Allocator, args: []const Value) PrimitiveError!Value {
+    try exactly(args, 1);
+    return .{ .boolean = args[0] == .vector };
+}
+
+fn makeVector(arena: std.mem.Allocator, args: []const Value) PrimitiveError!Value {
+    if (args.len < 1 or args.len > 2) return error.ArityMismatch;
+    const k = try asInt(args[0]);
+    if (k < 0 or k > 100_000_000) return error.TypeError;
+    const fill: Value = if (args.len == 2) args[1] else .unspecified;
+    const items = try arena.alloc(Value, @intCast(k));
+    @memset(items, fill);
+    return .{ .vector = items };
+}
+
+fn vectorOfArgs(arena: std.mem.Allocator, args: []const Value) PrimitiveError!Value {
+    return .{ .vector = try arena.dupe(Value, args) };
+}
+
+fn vectorLength(_: std.mem.Allocator, args: []const Value) PrimitiveError!Value {
+    try exactly(args, 1);
+    return .{ .integer = @intCast((try asVector(args[0])).len) };
+}
+
+fn vectorIndex(items: []const Value, v: Value) PrimitiveError!usize {
+    const k = try asInt(v);
+    if (k < 0 or k >= items.len) return error.TypeError;
+    return @intCast(k);
+}
+
+fn vectorRef(_: std.mem.Allocator, args: []const Value) PrimitiveError!Value {
+    try exactly(args, 2);
+    const items = try asVector(args[0]);
+    return items[try vectorIndex(items, args[1])];
+}
+
+fn vectorSet(_: std.mem.Allocator, args: []const Value) PrimitiveError!Value {
+    try exactly(args, 3);
+    const items = try asVector(args[0]);
+    items[try vectorIndex(items, args[1])] = args[2];
+    return .unspecified;
+}
+
+fn vectorToList(arena: std.mem.Allocator, args: []const Value) PrimitiveError!Value {
+    try exactly(args, 1);
+    const items = try asVector(args[0]);
+    var result: Value = .empty_list;
+    var i = items.len;
+    while (i > 0) {
+        i -= 1;
+        const p = try arena.create(Value.Pair);
+        p.* = .{ .car = items[i], .cdr = result };
+        result = .{ .pair = p };
+    }
+    return result;
+}
+
+fn listToVector(arena: std.mem.Allocator, args: []const Value) PrimitiveError!Value {
+    try exactly(args, 1);
+    var items: std.ArrayList(Value) = .empty;
+    defer items.deinit(arena);
+    var rest = args[0];
+    var fast = args[0];
+    while (rest == .pair) {
+        try items.append(arena, rest.pair.car);
+        rest = rest.pair.cdr;
+        if (fast == .pair) fast = fast.pair.cdr;
+        if (fast == .pair) fast = fast.pair.cdr;
+        if (rest == .pair and fast == .pair and rest.pair == fast.pair) return error.TypeError;
+    }
+    if (rest != .empty_list) return error.TypeError;
+    return .{ .vector = try arena.dupe(Value, items.items) };
+}
+
+fn vectorFill(_: std.mem.Allocator, args: []const Value) PrimitiveError!Value {
+    try exactly(args, 2);
+    @memset(try asVector(args[0]), args[1]);
+    return .unspecified;
+}
 
 fn isSymbol(_: std.mem.Allocator, args: []const Value) PrimitiveError!Value {
     try exactly(args, 1);

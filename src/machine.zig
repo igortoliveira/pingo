@@ -1265,6 +1265,17 @@ test "differential: machine and oracle agree on a form corpus" {
         "(equal? #(1 2) #(1 2))",
         "(equal? #(1 2) #(1 3))",
         "(eqv? #(1) #(1))",
+        // vector library (8E.3)
+        "(vector 1 'two \"three\")",
+        "(make-vector 3 0)",
+        "(vector-length #(a b c))",
+        "(vector-ref #(a b c) 1)",
+        "(vector-ref #(a) 5)",
+        "(define v (make-vector 2 0)) (vector-set! v 1 'x) v",
+        "(vector->list #(1 2 3))",
+        "(list->vector '(1 2))",
+        "(define fv (make-vector 2 0)) (vector-fill! fv 9) fv",
+        "(define sv #(1 2)) (vector-set! sv 0 99) sv",
         // cond/and/or (7.3): short-circuit means untaken positions may be unbound
         "(cond (#f 1) ((eq? 1 1) 'hit) (else 'miss))",
         "(cond (#f 1))",
