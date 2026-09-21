@@ -37,7 +37,14 @@ pub fn write(d: Datum, w: *std.Io.Writer) std.Io.Writer.Error!void {
 const value_mod = @import("value.zig");
 const Value = value_mod.Value;
 
+/// Cycle-safe (§1): the spine is capped and the car side depth-capped; the
+/// printer truncates with an ellipsis rather than diverging.
 pub fn writeValue(v: Value, w: *std.Io.Writer) std.Io.Writer.Error!void {
+    return writeValueDepth(v, w, 0);
+}
+
+fn writeValueDepth(v: Value, w: *std.Io.Writer, depth: usize) std.Io.Writer.Error!void {
+    if (depth > 200) return w.writeAll("...");
     switch (v) {
         .integer => |n| try w.print("{d}", .{n}),
         .real => |x| try writeReal(x, w),
@@ -52,15 +59,18 @@ pub fn writeValue(v: Value, w: *std.Io.Writer) std.Io.Writer.Error!void {
         .pending => |p| try w.print("#<pending {s}>", .{p.capability.name}),
         .pair => |p| {
             try w.writeByte('(');
-            try writeValue(p.car, w);
+            try writeValueDepth(p.car, w, depth + 1);
             var rest = p.cdr;
+            var spine: usize = 0;
             while (rest == .pair) : (rest = rest.pair.cdr) {
+                spine += 1;
+                if (spine > 10_000) return w.writeAll(" ...)");
                 try w.writeByte(' ');
-                try writeValue(rest.pair.car, w);
+                try writeValueDepth(rest.pair.car, w, depth + 1);
             }
             if (rest != .empty_list) {
                 try w.writeAll(" . ");
-                try writeValue(rest, w);
+                try writeValueDepth(rest, w, depth + 1);
             }
             try w.writeByte(')');
         },

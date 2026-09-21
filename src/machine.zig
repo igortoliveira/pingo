@@ -527,27 +527,67 @@ pub const Machine = struct {
     }
 
     /// Deep force: substitutes settled pendings throughout a data tree,
-    /// rebuilding pairs only where something changed.
+    /// rebuilding pairs only where something changed. Cycle-safe (§1): the
+    /// cdr spine is iterated under a node budget, the car side depth-capped;
+    /// exceeding either is limit-exceeded (a cyclic value can never become
+    /// checked pure data anyway).
     fn forceDeep(m: *Machine, v: Value) Error!Forced {
-        switch (v) {
-            .pending => return m.forced1(v),
-            .pair => |pr| {
-                const car = switch (try m.forceDeep(pr.car)) {
+        var budget: usize = 1_000_000;
+        return m.forceDeepInner(v, 0, &budget);
+    }
+
+    fn forceDeepInner(m: *Machine, v0: Value, depth: usize, budget: *usize) Error!Forced {
+        if (depth > 4_000) return m.walkerLimit();
+        const v = switch (try m.forced1(v0)) {
+            .value => |real| real,
+            .blocked => |p| return .{ .blocked = p },
+        };
+        if (v != .pair) return .{ .value = v };
+
+        // collect the spine, forcing each element
+        var cars: std.ArrayList(Value) = .empty;
+        defer cars.deinit(m.arena);
+        var node = v;
+        var changed = false;
+        while (true) {
+            if (budget.* == 0) return m.walkerLimit();
+            budget.* -= 1;
+            const car = switch (try m.forceDeepInner(node.pair.car, depth + 1, budget)) {
+                .value => |real| real,
+                .blocked => |p| return .{ .blocked = p },
+            };
+            if (!primitives.eqValues(car, node.pair.car)) changed = true;
+            try cars.append(m.arena, car);
+            const next = switch (try m.forced1(node.pair.cdr)) {
+                .value => |real| real,
+                .blocked => |p| return .{ .blocked = p },
+            };
+            if (!primitives.eqValues(next, node.pair.cdr)) changed = true;
+            if (next != .pair) {
+                const tail = switch (try m.forceDeepInner(next, depth + 1, budget)) {
                     .value => |real| real,
                     .blocked => |p| return .{ .blocked = p },
                 };
-                const cdr = switch (try m.forceDeep(pr.cdr)) {
-                    .value => |real| real,
-                    .blocked => |p| return .{ .blocked = p },
-                };
-                if (primitives.eqValues(car, pr.car) and primitives.eqValues(cdr, pr.cdr))
-                    return .{ .value = v };
-                const rebuilt = try m.arena.create(Value.Pair);
-                rebuilt.* = .{ .car = car, .cdr = cdr };
-                return .{ .value = .{ .pair = rebuilt } };
-            },
-            else => return .{ .value = v },
+                if (!primitives.eqValues(tail, next)) changed = true;
+                if (!changed) return .{ .value = v };
+                // rebuild the spine with the forced pieces
+                var rebuilt = tail;
+                var i = cars.items.len;
+                while (i > 0) {
+                    i -= 1;
+                    const pr = try m.arena.create(Value.Pair);
+                    pr.* = .{ .car = cars.items[i], .cdr = rebuilt };
+                    rebuilt = .{ .pair = pr };
+                }
+                return .{ .value = rebuilt };
+            }
+            node = next;
         }
+    }
+
+    fn walkerLimit(m: *Machine) Error {
+        m.diagnostic = .{ .context = "walker" };
+        return Error.LimitExceeded;
     }
 
     fn chargeFuel(m: *Machine) Error!void {

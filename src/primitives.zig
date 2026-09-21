@@ -331,18 +331,41 @@ fn eqv(_: std.mem.Allocator, args: []const Value) PrimitiveError!Value {
 }
 
 /// §2: structural — pairs recursively, strings by content, else eqv?.
+/// Cycle-safe (§1): the cdr spine is iterated under a node budget and the car
+/// side is depth-capped; exceeding either bound errors (never diverges).
 pub fn equalValues(a: Value, b: Value) bool {
-    if (@as(std.meta.Tag(Value), a) != @as(std.meta.Tag(Value), b)) return false;
-    return switch (a) {
-        .string => std.mem.eql(u8, a.string, b.string),
-        .pair => equalValues(a.pair.car, b.pair.car) and equalValues(a.pair.cdr, b.pair.cdr),
-        else => eqValues(a, b),
-    };
+    return equalValuesChecked(a, b) catch false;
+}
+
+pub fn equalValuesChecked(a: Value, b: Value) error{LimitExceeded}!bool {
+    var budget: usize = 1_000_000;
+    return equalInner(a, b, 0, &budget);
+}
+
+fn equalInner(a0: Value, b0: Value, depth: usize, budget: *usize) error{LimitExceeded}!bool {
+    if (depth > 4_000) return error.LimitExceeded;
+    var a = a0;
+    var b = b0;
+    while (true) {
+        if (budget.* == 0) return error.LimitExceeded;
+        budget.* -= 1;
+        if (@as(std.meta.Tag(Value), a) != @as(std.meta.Tag(Value), b)) return false;
+        switch (a) {
+            .string => return std.mem.eql(u8, a.string, b.string),
+            .pair => {
+                if (a.pair == b.pair) return true; // same cell (incl. shared cycles)
+                if (!try equalInner(a.pair.car, b.pair.car, depth + 1, budget)) return false;
+                a = a.pair.cdr;
+                b = b.pair.cdr;
+            },
+            else => return eqValues(a, b),
+        }
+    }
 }
 
 fn equalPred(_: std.mem.Allocator, args: []const Value) PrimitiveError!Value {
     try exactly(args, 2);
-    return .{ .boolean = equalValues(args[0], args[1]) };
+    return .{ .boolean = equalValuesChecked(args[0], args[1]) catch return error.LimitExceeded };
 }
 
 fn list(arena: std.mem.Allocator, args: []const Value) PrimitiveError!Value {
@@ -367,7 +390,16 @@ fn append(arena: std.mem.Allocator, args: []const Value) PrimitiveError!Value {
         var items: std.ArrayList(Value) = .empty;
         defer items.deinit(arena);
         var rest = args[i];
-        while (rest == .pair) : (rest = rest.pair.cdr) try items.append(arena, rest.pair.car);
+        var fast = args[i];
+        while (rest == .pair) {
+            try items.append(arena, rest.pair.car);
+            rest = rest.pair.cdr;
+            // Floyd: reject cyclic arguments instead of diverging (§1)
+            if (fast == .pair) fast = fast.pair.cdr;
+            if (fast == .pair) fast = fast.pair.cdr;
+            if (rest == .pair and fast == .pair and rest.pair == fast.pair)
+                return error.TypeError;
+        }
         if (rest != .empty_list) return error.TypeError; // proper lists only
         var j = items.items.len;
         while (j > 0) {
@@ -382,10 +414,20 @@ fn append(arena: std.mem.Allocator, args: []const Value) PrimitiveError!Value {
 
 fn length(_: std.mem.Allocator, args: []const Value) PrimitiveError!Value {
     try exactly(args, 1);
+    // Floyd: a cyclic list is not a proper list (§1 "Cycles").
+    var slow = args[0];
+    var fast = args[0];
     var n: i64 = 0;
-    var rest = args[0];
-    while (rest == .pair) : (rest = rest.pair.cdr) n += 1;
-    if (rest != .empty_list) return error.TypeError;
+    while (fast == .pair) {
+        fast = fast.pair.cdr;
+        n += 1;
+        if (fast != .pair) break;
+        fast = fast.pair.cdr;
+        n += 1;
+        slow = slow.pair.cdr;
+        if (fast == .pair and fast.pair == slow.pair) return error.TypeError;
+    }
+    if (fast != .empty_list) return error.TypeError;
     return .{ .integer = n };
 }
 
@@ -549,4 +591,42 @@ fn div(_: std.mem.Allocator, args: []const Value) PrimitiveError!Value {
         }
     }
     return acc.value();
+}
+
+// -- tests ---------------------------------------------------------------
+
+/// Builds `(1 2 . <cycle back to head>)` by hand — guest code can't make one
+/// until set-cdr! exists, but the walkers must already survive it.
+fn makeCycle(arena: std.mem.Allocator) !Value {
+    const a = try arena.create(Value.Pair);
+    const b = try arena.create(Value.Pair);
+    a.* = .{ .car = .{ .integer = 1 }, .cdr = .{ .pair = b } };
+    b.* = .{ .car = .{ .integer = 2 }, .cdr = .{ .pair = a } };
+    return .{ .pair = a };
+}
+
+test "walkers survive cyclic pairs" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const cyc = try makeCycle(arena);
+
+    try std.testing.expectError(error.TypeError, length(arena, &.{cyc}));
+    try std.testing.expectError(error.TypeError, append(arena, &.{ cyc, Value.empty_list }));
+    // same cell: trivially equal; two distinct cycles: bounded, errors
+    try std.testing.expect(try equalValuesChecked(cyc, cyc));
+    const cyc2 = try makeCycle(arena);
+    try std.testing.expectError(error.LimitExceeded, equalValuesChecked(cyc, cyc2));
+    try std.testing.expect(!value_mod.isPureData(cyc));
+}
+
+test "printer truncates cyclic values instead of diverging" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const cyc = try makeCycle(arena_state.allocator());
+
+    var out = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer out.deinit();
+    try @import("printer.zig").writeValue(cyc, &out.writer);
+    try std.testing.expect(std.mem.endsWith(u8, out.written(), " ...)"));
 }

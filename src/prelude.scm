@@ -20,12 +20,17 @@
   (let loop ((xs xs) (acc '()))
     (if (null? xs) acc (loop (cdr xs) (cons (car xs) acc)))))
 
-; No mutation exists yet (§1), so cyclic lists are impossible and the naive
-; walk is total. Revisit when set-cdr! lands (tier 8C).
+; Tortoise-and-hare (§1 "Cycles"): a cyclic list is not a proper list.
 (define (list? x)
-  (cond ((null? x) #t)
-        ((pair? x) (list? (cdr x)))
-        (else #f)))
+  (let loop ((slow x) (fast x))
+    (cond ((null? fast) #t)
+          ((not (pair? fast)) #f)
+          (else
+           (let ((fast1 (cdr fast)))
+             (cond ((null? fast1) #t)
+                   ((not (pair? fast1)) #f)
+                   ((eq? fast1 slow) #f)
+                   (else (loop (cdr slow) (cdr fast1)))))))))
 
 (define (%map1 f xs)
   (if (null? xs) '() (cons (f (car xs)) (%map1 f (cdr xs)))))

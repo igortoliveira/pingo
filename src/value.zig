@@ -18,6 +18,7 @@ pub const PrimitiveError = error{
     DivideByZero,
     IntegerOverflow,
     ArityMismatch,
+    LimitExceeded, // walker bounds (§1 "Cycles")
     OutOfMemory,
 };
 
@@ -82,14 +83,30 @@ pub fn isTruthy(v: Value) bool {
 }
 
 /// §4: pure data — no procedures or capabilities anywhere in the tree.
+/// Cycle-safe (§1): bounded by a node budget and a car-side depth cap;
+/// exceeding either is conservatively "not pure data".
 pub fn isPureData(v: Value) bool {
-    return switch (v) {
-        .integer, .real, .boolean, .symbol, .string, .empty_list, .unspecified => true,
-        .pair => |p| isPureData(p.car) and isPureData(p.cdr),
-        .closure, .primitive, .capability => false,
-        // Deep force substitutes resolved pendings before this check runs.
-        .pending => false,
-    };
+    var budget: usize = 1_000_000;
+    return isPureDataInner(v, 0, &budget);
+}
+
+fn isPureDataInner(v0: Value, depth: usize, budget: *usize) bool {
+    if (depth > 4_000) return false;
+    var v = v0;
+    while (true) {
+        if (budget.* == 0) return false;
+        budget.* -= 1;
+        switch (v) {
+            .integer, .real, .boolean, .symbol, .string, .empty_list, .unspecified => return true,
+            .pair => |p| {
+                if (!isPureDataInner(p.car, depth + 1, budget)) return false;
+                v = p.cdr; // iterate the spine
+            },
+            .closure, .primitive, .capability => return false,
+            // Deep force substitutes resolved pendings before this check runs.
+            .pending => return false,
+        }
+    }
 }
 
 /// Parses `(lambda (p ...) body1 ... bodyn)` given `form` = the datum after
