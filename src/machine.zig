@@ -43,6 +43,13 @@ const Control = union(enum) {
 
 const Expr = struct { d: Datum, env: *Env };
 
+/// A call waiting on pending arguments; `result` is already circulating in
+/// the program as a pending value.
+const Parked = struct {
+    result: *Pending,
+    args: []Value,
+};
+
 /// One suspended context; the application frame lands in 6.5.
 const Frame = union(enum) {
     /// After the condition of (if c t [e]): pick a branch from the value.
@@ -82,6 +89,9 @@ pub const Machine = struct {
     /// Every call dispatched during the current feed, for the toplevel
     /// stop-on-error scan (§4 toplevel sync).
     feed_calls: std.ArrayList(*Pending) = .empty,
+    /// Calls parked on pending arguments (§4 "Parked calls"): dispatched
+    /// automatically once their blockers settle.
+    parked_calls: std.ArrayList(Parked) = .empty,
 
     pub fn init(arena: std.mem.Allocator, limits: Limits) std.mem.Allocator.Error!Machine {
         const global = try Env.init(arena, null);
@@ -117,6 +127,7 @@ pub const Machine = struct {
         // them anymore (§3 abort semantics).
         m.outstanding_calls.clearRetainingCapacity();
         m.feed_calls.clearRetainingCapacity();
+        m.parked_calls.clearRetainingCapacity();
         m.diagnostic = null;
         if (d == .pair and isForm(d.pair, "define")) {
             const parts = try expand.defineParts(m.arena, d.pair.cdr);
@@ -147,10 +158,52 @@ pub const Machine = struct {
         for (m.outstanding_calls.items, 0..) |c, i| {
             if (c == p) {
                 _ = m.outstanding_calls.orderedRemove(i);
+                m.pumpParked() catch {}; // OOM here surfaces on the next continueRun
                 return;
             }
         }
         unreachable; // host protocol: p must come from outstanding()
+    }
+
+    /// Dispatches every parked call whose blockers have settled; propagates
+    /// failures to parked dependents without dispatching them (§4).
+    fn pumpParked(m: *Machine) std.mem.Allocator.Error!void {
+        var progressed = true;
+        while (progressed) {
+            progressed = false;
+            var i: usize = 0;
+            while (i < m.parked_calls.items.len) {
+                const pk = m.parked_calls.items[i];
+                var budget: usize = 1_000_000;
+                var all_ready = true;
+                var failed = false;
+                for (pk.args, 0..) |a, j| {
+                    const forced = m.forceDeepInner(a, 0, &budget) catch {
+                        failed = true; // failed blocker or walker limit
+                        break;
+                    };
+                    switch (forced) {
+                        .value => |real| pk.args[j] = real,
+                        .blocked => {
+                            all_ready = false;
+                            break;
+                        },
+                    }
+                }
+                if (failed) {
+                    pk.result.state = .failed;
+                    _ = m.parked_calls.swapRemove(i);
+                    progressed = true; // may fail further dependents
+                } else if (all_ready) {
+                    pk.result.args = pk.args;
+                    try m.outstanding_calls.append(m.arena, pk.result);
+                    _ = m.parked_calls.swapRemove(i);
+                    progressed = true;
+                } else {
+                    i += 1;
+                }
+            }
+        }
     }
 
     /// Continue after settling one or more calls.
@@ -198,6 +251,8 @@ pub const Machine = struct {
                         // §4 toplevel sync: the feed only completes when
                         // every dispatched call has settled...
                         if (m.outstanding_calls.items.len > 0) return .blocked;
+                        // parked ⇒ outstanding (§4 invariant)
+                        std.debug.assert(m.parked_calls.items.len == 0);
                         // ...and none failed, even if never forced
                         // (stop-on-error, §6).
                         for (m.feed_calls.items) |p| if (p.state == .failed) {
@@ -439,16 +494,29 @@ pub const Machine = struct {
             },
             .capability => |c| {
                 // Boundary arguments force deeply (§4): fully-resolved pure
-                // data or nothing.
+                // data or nothing. Independent classes park on pendings
+                // instead of blocking (§4 "Parked calls").
                 for (args, 0..) |a, i| {
-                    args[i] = switch (try m.forceDeep(a)) {
-                        .value => |real| real,
-                        .blocked => |p| return m.awaitAndReapply(collected, p),
-                    };
-                    if (!value_mod.isPureData(args[i])) {
+                    // procedures never cross, parked or not
+                    if (!isPureDataAllowingPendings(a)) {
                         m.diagnostic = .{ .context = c.name };
                         return Error.TypeError;
                     }
+                    args[i] = switch (try m.forceDeep(a)) {
+                        .value => |real| real,
+                        .blocked => |p| switch (c.class) {
+                            .pure, .external_independent => {
+                                const result = try m.arena.create(Pending);
+                                result.* = .{ .capability = c, .args = args };
+                                try m.parked_calls.append(m.arena, .{ .result = result, .args = args });
+                                try m.feed_calls.append(m.arena, result);
+                                return .{ .value = .{ .pending = result } };
+                            },
+                            // ordered classes drained first, so this cannot
+                            // happen for them — but stay conservative
+                            else => return m.awaitAndReapply(collected, p),
+                        },
+                    };
                 }
                 // Ordered classes (§4): drain outstanding calls first, and
                 // never dispatch past an already-failed call — the strongest
@@ -518,6 +586,21 @@ pub const Machine = struct {
     }
 
     const Forced = union(enum) { value: Value, blocked: *Pending };
+
+    /// §4 boundary check that tolerates pendings (they resolve to checked
+    /// pure data): rejects procedures/capabilities anywhere.
+    fn isPureDataAllowingPendings(v: Value) bool {
+        return switch (v) {
+            .pending => true,
+            .pair => |p| isPureDataAllowingPendings(p.car) and isPureDataAllowingPendings(p.cdr),
+            .vector => |items| blk: {
+                for (items) |item|
+                    if (!isPureDataAllowingPendings(item)) break :blk false;
+                break :blk true;
+            },
+            else => value_mod.isPureData(v),
+        };
+    }
 
     /// Shallow force: settles one pending level. Failed calls surface here
     /// as host-error (§3).
@@ -937,6 +1020,91 @@ test "machine: independent fan-out overlaps — four calls outstanding at once" 
     m.resolve(s, .{ .symbol = "ok" });
     out = try m.continueRun();
     try std.testing.expectEqualStrings("ok", out.value.symbol);
+}
+
+test "machine: parked calls — independent work overlaps a blocked chain" {
+    var t = TestMachine.init();
+    defer t.deinit();
+    _ = try t.run("1");
+    const arena = t.arena_state.allocator();
+    const m = &t.machine.?;
+
+    var dummy: u8 = 0;
+    const f = capability_mod.Capability{ .name = "f", .class = .external_independent, .ctx = &dummy, .handler = nopHandler };
+    const g = capability_mod.Capability{ .name = "g", .class = .external_independent, .ctx = &dummy, .handler = nopHandler };
+    const h = capability_mod.Capability{ .name = "h", .class = .external_independent, .ctx = &dummy, .handler = nopHandler };
+    try capability_mod.register(m.global, &f);
+    try capability_mod.register(m.global, &g);
+    try capability_mod.register(m.global, &h);
+
+    // The lambda-O shape our audit found missing: g waits on f, but h is
+    // independent and must dispatch anyway.
+    const outcome = try m.evalToplevel(try readOne(arena, "(list (g (f 1)) (h 2))"));
+    try std.testing.expect(outcome == .blocked);
+    try std.testing.expectEqual(@as(usize, 2), m.outstanding().len);
+    try std.testing.expectEqualStrings("f", m.outstanding()[0].capability.name);
+    try std.testing.expectEqualStrings("h", m.outstanding()[1].capability.name);
+
+    // resolve out of order: h first, then f — g auto-dispatches
+    m.resolve(m.outstanding()[1], .{ .integer = 200 });
+    var out = try m.continueRun();
+    try std.testing.expect(out == .blocked);
+    m.resolve(m.outstanding()[0], .{ .integer = 100 });
+    out = try m.continueRun();
+    try std.testing.expect(out == .blocked);
+    try std.testing.expectEqual(@as(usize, 1), m.outstanding().len);
+    try std.testing.expectEqualStrings("g", m.outstanding()[0].capability.name);
+    try std.testing.expectEqual(@as(i64, 100), m.outstanding()[0].args[0].integer);
+
+    m.resolve(m.outstanding()[0], .{ .integer = 300 });
+    out = try m.continueRun();
+    try std.testing.expectEqual(@as(i64, 300), out.value.pair.car.integer);
+    try std.testing.expectEqual(@as(i64, 200), out.value.pair.cdr.pair.car.integer);
+}
+
+test "machine: a failed blocker fails parked dependents without dispatching them" {
+    var t = TestMachine.init();
+    defer t.deinit();
+    _ = try t.run("1");
+    const arena = t.arena_state.allocator();
+    const m = &t.machine.?;
+
+    var dummy: u8 = 0;
+    const f = capability_mod.Capability{ .name = "f", .class = .external_independent, .ctx = &dummy, .handler = nopHandler };
+    const g = capability_mod.Capability{ .name = "g", .class = .external_independent, .ctx = &dummy, .handler = nopHandler };
+    const h = capability_mod.Capability{ .name = "h", .class = .external_independent, .ctx = &dummy, .handler = nopHandler };
+    try capability_mod.register(m.global, &f);
+    try capability_mod.register(m.global, &g);
+    try capability_mod.register(m.global, &h);
+
+    var outcome = try m.evalToplevel(try readOne(arena, "(list (g (f 1)) (h 2))"));
+    try std.testing.expect(outcome == .blocked);
+    m.resolveFailure(m.outstanding()[0]); // f fails: g must never dispatch
+    outcome = try m.continueRun();
+    try std.testing.expect(outcome == .blocked);
+    try std.testing.expectEqual(@as(usize, 1), m.outstanding().len);
+    try std.testing.expectEqualStrings("h", m.outstanding()[0].capability.name);
+    m.resolve(m.outstanding()[0], .{ .integer = 200 });
+    try std.testing.expectError(error.HostError, m.continueRun());
+    try std.testing.expectEqualStrings("f", m.diagnostic.?.context);
+}
+
+test "machine: parked calls still reject procedures in arguments" {
+    var t = TestMachine.init();
+    defer t.deinit();
+    _ = try t.run("1");
+    const arena = t.arena_state.allocator();
+    const m = &t.machine.?;
+
+    var dummy: u8 = 0;
+    const f = capability_mod.Capability{ .name = "f", .class = .external_independent, .ctx = &dummy, .handler = nopHandler };
+    const g = capability_mod.Capability{ .name = "g", .class = .external_independent, .ctx = &dummy, .handler = nopHandler };
+    try capability_mod.register(m.global, &f);
+    try capability_mod.register(m.global, &g);
+
+    const outcome = m.evalToplevel(try readOne(arena, "(g (cons (f 1) car))"));
+    try std.testing.expectError(error.TypeError, outcome);
+    try std.testing.expectEqualStrings("g", m.diagnostic.?.context);
 }
 
 test "machine: ordered calls drain the outstanding set first" {
