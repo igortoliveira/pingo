@@ -29,4 +29,9 @@ Add `--record run.trace` to save every settled call (op, args, result) to a
 file; `--replay run.trace` re-runs without `--tool` flags, reconstructing the
 tools from the trace and serving the recorded results (docs/host.md).
 
+Add `--async` to run on the native **libxev** event loop instead of the
+virtual clock: each tool call arms a real timer for its latency, so a batch of
+independent calls overlaps in wall-clock time (kqueue/io_uring). The final
+report shows real elapsed time vs the sequential sum.
+
 Zig: **0.16.0**

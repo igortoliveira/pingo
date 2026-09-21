@@ -9,6 +9,8 @@ pub fn build(b: *std.Build) void {
         .target = target,
     });
 
+    const xev = b.dependency("libxev", .{ .target = target, .optimize = optimize });
+
     const exe = b.addExecutable(.{
         .name = "pingo",
         .root_module = b.createModule(.{
@@ -17,6 +19,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .imports = &.{
                 .{ .name = "pingo", .module = mod },
+                .{ .name = "xev", .module = xev.module("xev") },
             },
         }),
     });

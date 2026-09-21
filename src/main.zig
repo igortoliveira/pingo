@@ -1,5 +1,6 @@
 const std = @import("std");
 const pingo = @import("pingo");
+const xev = @import("xev");
 
 const max_line_bytes = 4096;
 const max_read_depth = 64;
@@ -90,12 +91,15 @@ pub fn main(init: std.process.Init) !void {
     var file_path: ?[]const u8 = null;
     var tools: std.ArrayList(SimTool) = .empty;
     var trace = false;
+    var async_mode = false;
     var record_path: ?[]const u8 = null;
     var replay_path: ?[]const u8 = null;
     var i: usize = 1;
     while (i < args.len) : (i += 1) {
         if (std.mem.eql(u8, args[i], "--trace")) {
             trace = true;
+        } else if (std.mem.eql(u8, args[i], "--async")) {
+            async_mode = true;
         } else if (std.mem.eql(u8, args[i], "--record")) {
             i += 1;
             if (i >= args.len) {
@@ -132,6 +136,17 @@ pub fn main(init: std.process.Init) !void {
     }
 
     if (replay_path != null and tools.items.len > 0) {
+        try out.writeAll(usage);
+        try out.flush();
+        return;
+    }
+    if (async_mode and (record_path != null or replay_path != null)) {
+        try out.writeAll("--async cannot be combined with --record/--replay\n");
+        try out.flush();
+        return;
+    }
+    if (async_mode) {
+        if (file_path) |path| return runFileAsync(init, out, path, tools.items, trace);
         try out.writeAll(usage);
         try out.flush();
         return;
@@ -299,6 +314,148 @@ fn latencyOf(tools: []const SimTool, replay_tools: []const ReplayTool, cap: *con
     for (tools) |*tool| if (&tool.cap == cap) return tool.latency_ms;
     for (replay_tools) |*tool| if (&tool.cap == cap) return tool.latency_ms;
     return 0; // e.g. print
+}
+
+/// Native async host (docs/host.md): the real completion source is a libxev
+/// event loop. Each simulated tool call arms an `xev.Timer` for its latency in
+/// **wall-clock** time; a batch of independent calls arms concurrent timers, so
+/// the run finishes in about the slowest latency, not their sum — real overlap,
+/// on kqueue/io_uring, from plain sequential Scheme. This is the adapter the
+/// design doc names; the machine (sans-I/O) is unchanged.
+const AsyncHost = struct {
+    machine: *pingo.machine.Machine,
+    tools: []SimTool,
+    out: *std.Io.Writer,
+    trace: bool,
+    arena: std.mem.Allocator,
+    io: std.Io,
+    start_ns: i96,
+    seq_sum: u64 = 0,
+
+    fn elapsedMs(h: *const AsyncHost) u64 {
+        const now = std.Io.Clock.now(.awake, h.io).nanoseconds;
+        const d = now - h.start_ns;
+        return if (d <= 0) 0 else @intCast(@divTrunc(d, std.time.ns_per_ms));
+    }
+
+    const Call = struct {
+        host: *AsyncHost,
+        pending: *pingo.machine.Pending,
+        timer: xev.Timer,
+        completion: xev.Completion = undefined,
+    };
+
+    fn dispatch(h: *AsyncHost, loop: *xev.Loop, p: *pingo.machine.Pending) !void {
+        const latency = latencyOf(h.tools, &[_]ReplayTool{}, p.capability);
+        h.seq_sum += latency;
+        if (h.trace) {
+            h.out.print("[t={d:>5}ms] dispatch {s}", .{ h.elapsedMs(), p.capability.name }) catch {};
+            writeArgs(h.out, p.args) catch {};
+            h.out.writeByte('\n') catch {};
+        }
+        const call = try h.arena.create(Call);
+        call.* = .{ .host = h, .pending = p, .timer = try xev.Timer.init() };
+        call.timer.run(loop, &call.completion, latency, Call, call, onTimer);
+    }
+
+    fn onTimer(ud: ?*Call, _: *xev.Loop, _: *xev.Completion, r: xev.Timer.RunError!void) xev.CallbackAction {
+        const call = ud.?;
+        const h = call.host;
+        _ = r catch {};
+        const cap = call.pending.capability;
+        if (cap.handler(cap.ctx, h.arena, call.pending.args)) |result| {
+            if (h.trace) {
+                h.out.print("[t={d:>5}ms] settle   {s} -> ", .{ h.elapsedMs(), cap.name }) catch {};
+                pingo.printer.writeValue(result, h.out) catch {};
+                h.out.writeByte('\n') catch {};
+            }
+            h.machine.resolve(call.pending, result);
+        } else |_| {
+            if (h.trace) h.out.print("[t={d:>5}ms] settle   {s} -> FAILED\n", .{ h.elapsedMs(), cap.name }) catch {};
+            h.machine.resolveFailure(call.pending);
+        }
+        return .disarm;
+    }
+};
+
+fn runFileAsync(init: std.process.Init, out: *std.Io.Writer, path: []const u8, tools: []SimTool, trace: bool) !void {
+    var session_arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer session_arena_state.deinit();
+    var session_heap = pingo.limits.LimitedAllocator.init(session_arena_state.allocator(), repl_heap_bytes);
+    const session_arena = session_heap.allocator();
+
+    var machine = try pingo.machine.Machine.init(session_arena, repl_limits);
+    var print_host = PrintHost{ .out = out };
+    const print_cap = pingo.capability.Capability{
+        .name = "print",
+        .class = .globally_ordered,
+        .ctx = &print_host,
+        .handler = PrintHost.print,
+    };
+    try pingo.capability.register(machine.global, &print_cap);
+    for (tools) |*tool| {
+        tool.cap.ctx = tool;
+        try pingo.capability.register(machine.global, &tool.cap);
+    }
+
+    var loop = try xev.Loop.init(.{});
+    defer loop.deinit();
+
+    var host = AsyncHost{
+        .machine = &machine,
+        .tools = tools,
+        .out = out,
+        .trace = trace,
+        .arena = session_arena,
+        .io = init.io,
+        .start_ns = std.Io.Clock.now(.awake, init.io).nanoseconds,
+    };
+
+    const src = try readWholeFile(init, out, path, session_arena);
+    var reader = pingo.reader.Reader.init(session_arena, src, max_read_depth);
+
+    var last: pingo.value.Value = .unspecified;
+    var failed = false;
+    read_loop: while (true) {
+        const d = reader.read() catch |err| {
+            try out.print("read error: {s}\n", .{@errorName(err)});
+            try out.flush();
+            std.process.exit(1);
+        } orelse break;
+
+        var outcome = machine.evalToplevel(d) catch |err| {
+            try reportError(out, &machine, err);
+            failed = true;
+            break :read_loop;
+        };
+        while (outcome == .blocked) {
+            // Arm a real timer per outstanding call, then let libxev run the
+            // whole batch — the timers overlap in wall-clock time.
+            for (machine.outstanding()) |p| try host.dispatch(&loop, p);
+            try loop.run(.until_done);
+            outcome = machine.continueRun() catch |err| {
+                try reportError(out, &machine, err);
+                failed = true;
+                break :read_loop;
+            };
+        }
+        last = outcome.value;
+    }
+
+    if (!failed and last != .unspecified) {
+        try pingo.printer.writeValue(last, out);
+        try out.writeByte('\n');
+    }
+    if (host.seq_sum > 0) {
+        const real_ms = host.elapsedMs();
+        const speedup = if (real_ms > 0)
+            @as(f64, @floatFromInt(host.seq_sum)) / @as(f64, @floatFromInt(real_ms))
+        else
+            1.0;
+        try out.print("real time: {d}ms | sequential sum: {d}ms | speedup: {d:.2}x\n", .{ real_ms, host.seq_sum, speedup });
+    }
+    try out.flush();
+    if (failed) std.process.exit(1);
 }
 
 fn readWholeFile(init: std.process.Init, out: *std.Io.Writer, path: []const u8, arena: std.mem.Allocator) ![]u8 {

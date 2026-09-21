@@ -3,7 +3,12 @@
     .version = "0.0.0",
     .fingerprint = 0xcc26c8d8cd0403c7, // Changing this has security and trust implications.
     .minimum_zig_version = "0.16.0",
-    .dependencies = .{},
+    .dependencies = .{
+        .libxev = .{
+            .url = "git+https://github.com/mitchellh/libxev#9ce8e8e6ff89e583258a7f8e7adeeeaeae8611bf",
+            .hash = "libxev-0.0.0-86vtcwIRFADbH4hk-EjROXxlrKIRPQdA41XiTSytYO-F",
+        },
+    },
     .paths = .{
         "build.zig",
         "build.zig.zon",
