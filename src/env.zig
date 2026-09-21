@@ -26,6 +26,18 @@ pub const Env = struct {
         gop.value_ptr.* = v;
     }
 
+    /// Assigns the nearest binding of `name` (§2 set!); false if unbound.
+    pub fn set(env: *Env, name: []const u8, v: Value) bool {
+        var cur: ?*Env = env;
+        while (cur) |c| : (cur = c.parent) {
+            if (c.bindings.getPtr(name)) |slot| {
+                slot.* = v;
+                return true;
+            }
+        }
+        return false;
+    }
+
     pub fn lookup(env: *const Env, name: []const u8) ?Value {
         var cur: ?*const Env = env;
         while (cur) |c| : (cur = c.parent) {

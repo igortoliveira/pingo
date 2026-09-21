@@ -185,6 +185,18 @@ pub const Evaluator = struct {
                         }
                         return .unspecified;
                     }
+                    if (isForm(p, "set!")) {
+                        const a = p.cdr;
+                        if (a != .pair or a.pair.car != .symbol) return Error.BadSyntax;
+                        if (a.pair.cdr != .pair or a.pair.cdr.pair.cdr != .empty_list)
+                            return Error.BadSyntax;
+                        const v = try e.eval(a.pair.cdr.pair.car, scope);
+                        if (!scope.set(a.pair.car.symbol, v)) {
+                            e.diagnostic = .{ .context = a.pair.car.symbol };
+                            return Error.UnboundVariable;
+                        }
+                        return .unspecified;
+                    }
                     if (isForm(p, "lambda")) return e.makeClosure(p.cdr, scope);
                     if (isForm(p, "let")) {
                         d = try expand.expandLet(e.arena, p.cdr);

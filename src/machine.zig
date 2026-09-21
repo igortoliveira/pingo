@@ -52,6 +52,8 @@ const Frame = union(enum) {
     seq: struct { rest: Datum, env: *Env },
     /// Toplevel (define name _): bind the arrived value globally (§2).
     define: struct { name: []const u8 },
+    /// (set! name _): assign the nearest binding to the arrived value (§2).
+    assign: struct { name: []const u8, env: *Env },
     /// An application evaluated left-to-right (one of §2's valid orders):
     /// the arrived value joins `collected` ([0] is the operator); `remaining`
     /// holds operand datums still to evaluate (invariant: a proper list).
@@ -272,6 +274,14 @@ pub const Machine = struct {
                     if (check != .empty_list) return Error.BadSyntax;
                     return m.enterSequence(p.cdr, x.env);
                 }
+                if (isForm(p, "set!")) {
+                    const a = p.cdr;
+                    if (a != .pair or a.pair.car != .symbol) return Error.BadSyntax;
+                    if (a.pair.cdr != .pair or a.pair.cdr.pair.cdr != .empty_list)
+                        return Error.BadSyntax;
+                    try m.pushFrame(.{ .assign = .{ .name = a.pair.car.symbol, .env = x.env } });
+                    return .{ .expr = .{ .d = a.pair.cdr.pair.car, .env = x.env } };
+                }
                 if (isForm(p, "lambda"))
                     return .{ .value = try value_mod.makeClosure(m.arena, p.cdr, x.env) };
                 if (isForm(p, "let"))
@@ -345,6 +355,13 @@ pub const Machine = struct {
             .seq => |s| return m.enterSequence(s.rest, s.env),
             .define => |def| {
                 try m.global.define(def.name, v);
+                return .{ .value = .unspecified };
+            },
+            .assign => |a| {
+                if (!a.env.set(a.name, v)) {
+                    m.diagnostic = .{ .context = a.name };
+                    return Error.UnboundVariable;
+                }
                 return .{ .value = .unspecified };
             },
             .app => |popped| {
@@ -1131,6 +1148,13 @@ test "differential: machine and oracle agree on a form corpus" {
         "(floor 3)",
         "(list (even? 4) (odd? 4) (even? -3))",
         "(list (gcd 12 18) (gcd) (lcm 4 6) (lcm))",
+        // set! (8C.2)
+        "(define x 1) (set! x 2) x",
+        "(define (counter) (let ((n 0)) (lambda () (set! n (+ n 1)) n))) (define c (counter)) (c) (c) (c)",
+        "(let ((y 1)) (set! y (+ y 10)) y)",
+        "(set! nope 1)",
+        "(set! 3 1)",
+        "(set!)",
         // cond/and/or (7.3): short-circuit means untaken positions may be unbound
         "(cond (#f 1) ((eq? 1 1) 'hit) (else 'miss))",
         "(cond (#f 1))",
