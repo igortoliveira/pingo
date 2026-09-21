@@ -172,6 +172,10 @@ pub const Evaluator = struct {
                         d = try expand.expandLet(e.arena, p.cdr);
                         continue;
                     }
+                    if (isForm(p, "let*")) {
+                        d = try expand.expandLetStar(e.arena, p.cdr);
+                        continue;
+                    }
                     if (isForm(p, "cond")) {
                         d = try expand.expandCond(e.arena, p.cdr, scope.lookup("else") != null);
                         continue;

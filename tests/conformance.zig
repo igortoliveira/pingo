@@ -13,7 +13,7 @@ const Value = pingo.value.Value;
 
 const suite = @embedFile("vendor/chibi-scheme/r5rs-tests.scm");
 
-const special_forms = [_][]const u8{ "quote", "if", "define", "lambda", "begin", "let", "cond", "and", "or", "else" };
+const special_forms = [_][]const u8{ "quote", "if", "define", "lambda", "begin", "let", "let*", "cond", "and", "or", "else" };
 
 pub fn main(init: std.process.Init) !void {
     var stdout_buffer: [4096]u8 = undefined;
@@ -145,18 +145,29 @@ fn check(
         },
         .pair => |p| {
             if (p.car == .symbol and std.mem.eql(u8, p.car.symbol, "quote")) return true;
-            if (p.car == .symbol and std.mem.eql(u8, p.car.symbol, "let") and p.cdr == .pair) {
+            if (p.car == .symbol and (std.mem.eql(u8, p.car.symbol, "let") or
+                std.mem.eql(u8, p.car.symbol, "let*")) and p.cdr == .pair)
+            {
+                const sequential = p.car.symbol.len == 4; // let*
                 const before = bound.items.len;
                 defer bound.shrinkRetainingCapacity(before);
+                var names: std.ArrayList([]const u8) = .empty;
+                defer names.deinit(arena);
                 var bindings = p.cdr.pair.car;
                 while (bindings == .pair) : (bindings = bindings.pair.cdr) {
                     const binding = bindings.pair.car;
                     if (binding != .pair or binding.pair.car != .symbol) return false;
-                    // binding expressions are checked in the outer scope
+                    // plain let checks inits in the OUTER scope; let* sees
+                    // the names bound so far
                     if (binding.pair.cdr == .pair)
                         if (!try check(arena, binding.pair.cdr.pair.car, evaluator, bound)) return false;
-                    try bound.append(arena, binding.pair.car.symbol);
+                    if (sequential) {
+                        try bound.append(arena, binding.pair.car.symbol);
+                    } else {
+                        try names.append(arena, binding.pair.car.symbol);
+                    }
                 }
+                for (names.items) |n| try bound.append(arena, n);
                 var body = p.cdr.pair.cdr;
                 while (body == .pair) : (body = body.pair.cdr)
                     if (!try check(arena, body.pair.car, evaluator, bound)) return false;

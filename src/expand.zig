@@ -38,6 +38,23 @@ pub fn expandLet(arena: std.mem.Allocator, form: Datum) Error!Datum {
     return try datum_mod.cons(arena, lambda_form, try listFrom(arena, exprs.items));
 }
 
+/// `(let* ((n e) ...) body ...)` → nested `let`s, one binding each, so every
+/// init sees the names before it.
+pub fn expandLetStar(arena: std.mem.Allocator, form: Datum) Error!Datum {
+    if (form != .pair) return error.BadSyntax;
+    const bindings = form.pair.car;
+    if (bindings == .empty_list)
+        return try datum_mod.cons(arena, try datum_mod.symbol(arena, "let"), form);
+    if (bindings != .pair) return error.BadSyntax;
+    const first = try listOf(arena, &.{bindings.pair.car});
+    const inner = try datum_mod.cons(
+        arena,
+        try datum_mod.symbol(arena, "let*"),
+        try datum_mod.cons(arena, bindings.pair.cdr, form.pair.cdr),
+    );
+    return try listOf(arena, &.{ try datum_mod.symbol(arena, "let"), first, inner });
+}
+
 /// `(cond (c e ...) ... [(else e ...)])` → nested `if`s. Each clause needs at
 /// least one expression after its test; `else` must be last. No matching
 /// clause yields unspecified (expansion target: `(if #f #f)`).
@@ -158,6 +175,11 @@ fn expectExpansion(expander: anytype, src: []const u8, expected: []const u8) !vo
 test "let expands to a lambda application" {
     try expectExpansion(expandLet, "(let ((x 1) (y 2)) (+ x y))", "((lambda (x y) (+ x y)) 1 2)");
     try expectExpansion(expandLet, "(let () 5)", "((lambda () 5))");
+}
+
+test "let* expands to nested lets" {
+    try expectExpansion(expandLetStar, "(let* ((x 1) (y x)) y)", "(let ((x 1)) (let* ((y x)) y))");
+    try expectExpansion(expandLetStar, "(let* () 5)", "(let () 5)");
 }
 
 test "cond, and, or expansions" {
