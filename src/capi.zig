@@ -268,6 +268,90 @@ export fn pingo_resolve_failure(s: ?*Session, token: u64) c_int {
     return 0;
 }
 
+// -- synchronous convenience layer ----------------------------------------
+//
+// Matches the ergonomics of handle-based Schemes (Chibi's sexp_define_foreign
+// + sexp_eval_string, s7_define_function + s7_eval_c_string) but without their
+// GC-rooting burden, since only pure-data text crosses the boundary (§4).
+
+/// A C capability handler: receives the call's arguments as an s-expression
+/// list, returns the result as an s-expression (pure data), or NULL to signal
+/// a host failure (surfaces as host-error). The returned string need only be
+/// valid until the handler returns.
+pub const PingoHandler = *const fn (user: ?*anyopaque, args: [*:0]const u8) callconv(.c) ?[*:0]const u8;
+
+/// Bridges a registered C handler to the machine's capability handler. Runs
+/// synchronously under `runToCompletion` (never in the blocked/resolve path).
+const CFnCap = struct {
+    handler: PingoHandler,
+    user: ?*anyopaque,
+
+    fn bridge(ctx: *anyopaque, arena: std.mem.Allocator, args: []const Value) pingo.capability.HostError!Value {
+        const cc: *CFnCap = @ptrCast(@alignCast(ctx));
+        var buf = std.Io.Writer.Allocating.init(arena);
+        defer buf.deinit();
+        buf.writer.writeByte('(') catch return error.OutOfMemory;
+        for (args, 0..) |arg, i| {
+            if (i > 0) buf.writer.writeByte(' ') catch return error.OutOfMemory;
+            pingo.printer.writeValue(arg, &buf.writer) catch return error.OutOfMemory;
+        }
+        buf.writer.writeByte(')') catch return error.OutOfMemory;
+        buf.writer.writeByte(0) catch return error.OutOfMemory;
+        const args_c: [*:0]const u8 = @ptrCast(buf.written().ptr);
+
+        const res = cc.handler(cc.user, args_c) orelse return error.HostError;
+        var r = pingo.reader.Reader.init(arena, std.mem.span(res), max_depth);
+        const d = (r.read() catch return error.HostError) orelse return error.HostError;
+        return pingo.value.fromDatum(arena, d) catch return error.HostError;
+    }
+};
+
+/// Registers a capability backed by a synchronous C handler. Use with
+/// `pingo_eval`. Returns 0 on success, -1 on error.
+export fn pingo_register_fn(s: ?*Session, name: [*:0]const u8, class: c_int, handler: PingoHandler, user: ?*anyopaque) c_int {
+    const sess = s orelse return -1;
+    const cls = classFromInt(class) orelse return -1;
+    const a = sess.arena();
+    const cc = a.create(CFnCap) catch return -1;
+    cc.* = .{ .handler = handler, .user = user };
+    const cap = a.create(Capability) catch return -1;
+    cap.* = .{
+        .name = a.dupe(u8, std.mem.span(name)) catch return -1,
+        .class = cls,
+        .ctx = cc,
+        .handler = CFnCap.bridge,
+    };
+    pingo.capability.register(sess.machine.global, cap) catch return -1;
+    return 0;
+}
+
+/// Evaluates a program (`src`) to completion, servicing capability calls
+/// through their registered C handlers (see `pingo_register_fn`). Returns the
+/// last form's value as s-expression text (valid until the next call), or NULL
+/// on error — then `pingo_error` has the kind.
+export fn pingo_eval(s: ?*Session, src: [*:0]const u8) ?[*:0]const u8 {
+    const sess = s orelse return null;
+    const copy = sess.arena().dupe(u8, std.mem.span(src)) catch return null;
+    var r = pingo.reader.Reader.init(sess.arena(), copy, max_depth);
+    var last: Value = .unspecified;
+    while (true) {
+        const d = (r.read() catch |err| {
+            sess.err_kind = @errorName(err);
+            sess.machine.diagnostic = .{ .context = "read" };
+            sess.status = PINGO_ERROR;
+            return null;
+        }) orelse break;
+        last = sess.machine.runToCompletion(d) catch |err| {
+            sess.err_kind = pingo.eval.kindOf(err);
+            sess.status = PINGO_ERROR;
+            return null;
+        };
+    }
+    sess.status = PINGO_VALUE;
+    sess.last = last;
+    return sess.cprint(last);
+}
+
 /// The library version string.
 export fn pingo_version() [*:0]const u8 {
     return pingo.version;
@@ -296,6 +380,27 @@ test "capi: capability round-trip via blocked/resolve" {
     try std.testing.expectEqual(@as(c_int, 0), pingo_resolve(s, tok, "41"));
     try std.testing.expectEqual(PINGO_VALUE, pingo_continue(s));
     try std.testing.expectEqualStrings("42", std.mem.span(pingo_result(s)));
+}
+
+fn testDouble(_: ?*anyopaque, args: [*:0]const u8) callconv(.c) ?[*:0]const u8 {
+    // args is "(n)"; return "2n" without parsing — the corpus only calls (dbl 21)
+    _ = args;
+    return "42";
+}
+
+test "capi: synchronous eval with a C handler" {
+    const s = pingo_new(1_000_000, 500, 0).?;
+    defer pingo_free(s);
+    try std.testing.expectEqual(@as(c_int, 0), pingo_register_fn(s, "dbl", PINGO_INDEPENDENT, testDouble, null));
+    const res = pingo_eval(s, "(+ 0 (dbl 21))") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("42", std.mem.span(res));
+}
+
+test "capi: synchronous eval surfaces errors as NULL" {
+    const s = pingo_new(1_000_000, 500, 0).?;
+    defer pingo_free(s);
+    try std.testing.expectEqual(@as(?[*:0]const u8, null), pingo_eval(s, "(car '())"));
+    try std.testing.expectEqual(PINGO_ERROR, s.status);
 }
 
 test "capi: multi-form program and error status" {

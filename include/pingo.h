@@ -68,6 +68,26 @@ const char *pingo_call_args(pingo_session *s, uint64_t token); /* s-expr list   
 int pingo_resolve(pingo_session *s, uint64_t token, const char *result_src);
 int pingo_resolve_failure(pingo_session *s, uint64_t token);
 
+/*
+ * Synchronous convenience layer (Chibi/s7-style ergonomics, no GC rooting).
+ * Register a C handler per capability, then pingo_eval runs to completion and
+ * calls the handlers directly. Use this instead of the blocked/resolve loop
+ * when the host does not need to own the wait.
+ */
+
+/* Receives the call's arguments as an s-expression list; returns the result as
+ * an s-expression (pure data), or NULL to signal a host failure. The returned
+ * string need only stay valid until the handler returns. */
+typedef const char *(*pingo_handler)(void *user, const char *args);
+
+int pingo_register_fn(pingo_session *s, const char *name, int effect_class,
+                      pingo_handler handler, void *user);
+
+/* Evaluate a program to completion via the registered handlers. Returns the
+ * value as s-expression text (valid until the next call), or NULL on error
+ * (then pingo_error() has the kind). */
+const char *pingo_eval(pingo_session *s, const char *src);
+
 const char *pingo_version(void);
 
 #ifdef __cplusplus
