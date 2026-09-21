@@ -1119,6 +1119,18 @@ test "differential: machine and oracle agree on a form corpus" {
         "(inexact->exact 3.0)",
         "(inexact->exact 3.5)",
         "(list (zero? 0) (positive? 2.5) (negative? -1))",
+        // numeric library (8B.6)
+        "(list (quotient 7 2) (remainder 7 2) (modulo 7 2))",
+        "(list (quotient -7 2) (remainder -7 2) (modulo -7 2))",
+        "(modulo 7 -2)",
+        "(quotient 1 0)",
+        "(list (expt 2 10) (expt 2 -1) (expt 2.0 2))",
+        "(list (sqrt 16) (sqrt 2))",
+        "(sqrt -1)",
+        "(list (floor 3.7) (ceiling 3.2) (truncate -3.7) (round 3.5) (round 2.5) (round -3.5))",
+        "(floor 3)",
+        "(list (even? 4) (odd? 4) (even? -3))",
+        "(list (gcd 12 18) (gcd) (lcm 4 6) (lcm))",
         // cond/and/or (7.3): short-circuit means untaken positions may be unbound
         "(cond (#f 1) ((eq? 1 1) 'hit) (else 'miss))",
         "(cond (#f 1))",

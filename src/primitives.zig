@@ -60,7 +60,128 @@ const table = [_]Value.Primitive{
     .{ .name = "inexact?", .func = isInexact },
     .{ .name = "exact->inexact", .func = exactToInexact },
     .{ .name = "inexact->exact", .func = inexactToExact },
+    .{ .name = "quotient", .func = quotient },
+    .{ .name = "remainder", .func = remainder },
+    .{ .name = "modulo", .func = modulo },
+    .{ .name = "expt", .func = expt },
+    .{ .name = "sqrt", .func = sqrtFn },
+    .{ .name = "floor", .func = floorFn },
+    .{ .name = "ceiling", .func = ceilingFn },
+    .{ .name = "truncate", .func = truncateFn },
+    .{ .name = "round", .func = roundFn },
 };
+
+fn intDiv2(args: []const Value, comptime f: fn (i64, i64) i64) PrimitiveError!Value {
+    try exactly(args, 2);
+    const a = try asInt(args[0]);
+    const b = try asInt(args[1]);
+    if (b == 0) return error.DivideByZero;
+    if (a == std.math.minInt(i64) and b == -1) return error.IntegerOverflow;
+    return .{ .integer = f(a, b) };
+}
+
+fn quotient(_: std.mem.Allocator, args: []const Value) PrimitiveError!Value {
+    return intDiv2(args, struct {
+        fn f(a: i64, b: i64) i64 {
+            return @divTrunc(a, b);
+        }
+    }.f);
+}
+
+fn remainder(_: std.mem.Allocator, args: []const Value) PrimitiveError!Value {
+    return intDiv2(args, struct {
+        fn f(a: i64, b: i64) i64 {
+            return @rem(a, b);
+        }
+    }.f);
+}
+
+fn modulo(_: std.mem.Allocator, args: []const Value) PrimitiveError!Value {
+    return intDiv2(args, struct {
+        fn f(a: i64, b: i64) i64 {
+            return @mod(a, b);
+        }
+    }.f);
+}
+
+/// Exact base with non-negative exact exponent stays exact (overflow errors);
+/// anything else goes through f64 pow.
+fn expt(_: std.mem.Allocator, args: []const Value) PrimitiveError!Value {
+    try exactly(args, 2);
+    const base = try Num.of(args[0]);
+    const expo = try Num.of(args[1]);
+    if (base == .int and expo == .int and expo.int >= 0) {
+        var acc: i64 = 1;
+        var b = base.int;
+        var e = expo.int;
+        while (e > 0) {
+            if (e & 1 == 1) acc = std.math.mul(i64, acc, b) catch return error.IntegerOverflow;
+            e >>= 1;
+            if (e > 0) b = std.math.mul(i64, b, b) catch return error.IntegerOverflow;
+        }
+        return .{ .integer = acc };
+    }
+    return .{ .real = std.math.pow(f64, base.toF(), expo.toF()) };
+}
+
+fn sqrtFn(_: std.mem.Allocator, args: []const Value) PrimitiveError!Value {
+    try exactly(args, 1);
+    const n = try Num.of(args[0]);
+    const x = n.toF();
+    if (x < 0) return error.TypeError; // no complex numbers (§1)
+    const r = @sqrt(x);
+    // exact perfect squares stay exact
+    if (n == .int and @floor(r) == r and @abs(r) <= 9007199254740992.0) {
+        const ri: i64 = @intFromFloat(r);
+        if (std.math.mul(i64, ri, ri) catch null == n.int) return .{ .integer = ri };
+    }
+    return .{ .real = r };
+}
+
+fn realUnary(args: []const Value, comptime f: fn (f64) f64) PrimitiveError!Value {
+    try exactly(args, 1);
+    return switch (args[0]) {
+        .integer => args[0], // already integral, stays exact (R5RS)
+        .real => |x| .{ .real = f(x) },
+        else => error.TypeError,
+    };
+}
+
+fn floorFn(_: std.mem.Allocator, args: []const Value) PrimitiveError!Value {
+    return realUnary(args, struct {
+        fn f(x: f64) f64 {
+            return @floor(x);
+        }
+    }.f);
+}
+
+fn ceilingFn(_: std.mem.Allocator, args: []const Value) PrimitiveError!Value {
+    return realUnary(args, struct {
+        fn f(x: f64) f64 {
+            return @ceil(x);
+        }
+    }.f);
+}
+
+fn truncateFn(_: std.mem.Allocator, args: []const Value) PrimitiveError!Value {
+    return realUnary(args, struct {
+        fn f(x: f64) f64 {
+            return @trunc(x);
+        }
+    }.f);
+}
+
+fn roundFn(_: std.mem.Allocator, args: []const Value) PrimitiveError!Value {
+    return realUnary(args, struct {
+        // R5RS rounds to even on ties
+        fn f(x: f64) f64 {
+            const r = @round(x);
+            if (@abs(x - @trunc(x)) == 0.5 and @mod(r, 2.0) != 0.0)
+                return r - std.math.sign(x);
+            return r;
+        }
+    }.f);
+}
 
 fn isNumber(_: std.mem.Allocator, args: []const Value) PrimitiveError!Value {
     try exactly(args, 1);

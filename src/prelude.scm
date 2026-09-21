@@ -71,6 +71,19 @@
 
 (define (abs n) (if (< n 0) (- n) n))
 
+(define (even? n) (= 0 (remainder n 2)))
+(define (odd? n) (not (even? n)))
+
+(define (%gcd2 a b) (if (zero? b) (abs a) (%gcd2 b (remainder a b))))
+(define (gcd . ns)
+  (let loop ((acc 0) (ns ns))
+    (if (null? ns) acc (loop (%gcd2 acc (car ns)) (cdr ns)))))
+(define (%lcm2 a b)
+  (if (or (zero? a) (zero? b)) 0 (abs (* (quotient a (%gcd2 a b)) b))))
+(define (lcm . ns)
+  (let loop ((acc 1) (ns ns))
+    (if (null? ns) acc (loop (%lcm2 acc (car ns)) (cdr ns)))))
+
 (define (zero? n) (= n 0))
 (define (positive? n) (> n 0))
 (define (negative? n) (< n 0))
