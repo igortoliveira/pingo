@@ -366,9 +366,8 @@ pub const Machine = struct {
         switch (op) {
             // Parameter binding is not strict: closures accept pendings.
             .closure => |c| {
-                if (args.len != c.params.len) return Error.ArityMismatch;
                 const child = try Env.init(m.arena, c.env);
-                for (c.params, args) |name, arg| try child.define(name, arg);
+                try value_mod.bindArgs(m.arena, c, args, child);
                 if (c.body.len == 1) // tail position: push nothing
                     return .{ .expr = .{ .d = c.body[0], .env = child } };
                 try m.pushFrame(.{ .body = .{ .rest = c.body[1..], .env = child } });
@@ -997,6 +996,15 @@ test "differential: machine and oracle agree on a form corpus" {
         "(define (f x) 1 (* x x)) (f 4)",
         "(define (7) 1)",
         "(define ((f)) 1)",
+        // rest args (8F'.4)
+        "((lambda args args) 1 2 3)",
+        "((lambda args args))",
+        "((lambda (a . r) (cons a r)) 1 2 3)",
+        "((lambda (a . r) r) 1)",
+        "((lambda (a . r) r))",
+        "(define (f a . r) (cons a r)) (f 1 2)",
+        "(lambda (a . 2) a)",
+        "(lambda (a . a) a)",
         // cond/and/or (7.3): short-circuit means untaken positions may be unbound
         "(cond (#f 1) ((eq? 1 1) 'hit) (else 'miss))",
         "(cond (#f 1))",

@@ -264,6 +264,7 @@ fn check(
                     if (params.pair.car != .symbol) return false;
                     try bound.append(arena, params.pair.car.symbol);
                 }
+                if (params == .symbol) try bound.append(arena, params.symbol);
                 var body = p.cdr.pair.cdr;
                 while (body == .pair) : (body = body.pair.cdr)
                     if (!try check(arena, body.pair.car, evaluator, bound)) return false;

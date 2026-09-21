@@ -238,9 +238,8 @@ pub const Evaluator = struct {
                         .closure => |c| {
                             // Inline the closure call so its last body expression
                             // is a tail position of this loop.
-                            if (args.items.len != c.params.len) return Error.ArityMismatch;
                             const child = try Env.init(e.arena, c.env);
-                            for (c.params, args.items) |name, v| try child.define(name, v);
+                            try value_mod.bindArgs(e.arena, c, args.items, child);
                             for (c.body[0 .. c.body.len - 1]) |bd| _ = try e.eval(bd, child);
                             d = c.body[c.body.len - 1];
                             scope = child;
@@ -260,9 +259,8 @@ pub const Evaluator = struct {
     pub fn apply(e: *Evaluator, op: Value, args: []const Value) Error!Value {
         switch (op) {
             .closure => |c| {
-                if (args.len != c.params.len) return Error.ArityMismatch;
                 const child = try Env.init(e.arena, c.env);
-                for (c.params, args) |name, v| try child.define(name, v);
+                try value_mod.bindArgs(e.arena, c, args, child);
                 var result: Value = .unspecified;
                 for (c.body) |bd| result = try e.eval(bd, child);
                 return result;

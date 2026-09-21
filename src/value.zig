@@ -65,6 +65,9 @@ pub const Value = union(enum) {
 
     pub const Closure = struct {
         params: []const []const u8,
+        /// §2 formals: `(p ... . rest)` or a bare symbol bind extra arguments
+        /// as a list under this name.
+        rest: ?[]const u8 = null,
         /// Non-empty body, evaluated like `begin`. The datums must live in
         /// the session arena (they outlive the line that read them).
         body: []const datum_mod.Datum,
@@ -99,15 +102,27 @@ pub fn makeClosure(
     if (form != .pair) return error.BadSyntax;
     var params: std.ArrayList([]const u8) = .empty;
     defer params.deinit(arena);
+    var rest_name: ?[]const u8 = null;
+
     var rest = form.pair.car;
-    while (rest == .pair) : (rest = rest.pair.cdr) {
-        if (rest.pair.car != .symbol) return error.BadSyntax;
-        const name = rest.pair.car.symbol;
-        for (params.items) |seen|
-            if (std.mem.eql(u8, seen, name)) return error.BadSyntax;
-        try params.append(arena, name);
+    if (rest == .symbol) {
+        rest_name = rest.symbol; // (lambda args body ...): everything as a list
+    } else {
+        while (rest == .pair) : (rest = rest.pair.cdr) {
+            if (rest.pair.car != .symbol) return error.BadSyntax;
+            const name = rest.pair.car.symbol;
+            for (params.items) |seen|
+                if (std.mem.eql(u8, seen, name)) return error.BadSyntax;
+            try params.append(arena, name);
+        }
+        switch (rest) {
+            .empty_list => {},
+            .symbol => |r| rest_name = r, // (p ... . rest)
+            else => return error.BadSyntax,
+        }
     }
-    if (rest != .empty_list) return error.BadSyntax;
+    if (rest_name) |r| for (params.items) |seen|
+        if (std.mem.eql(u8, seen, r)) return error.BadSyntax;
 
     var body: std.ArrayList(datum_mod.Datum) = .empty;
     defer body.deinit(arena);
@@ -118,10 +133,35 @@ pub fn makeClosure(
     const c = try arena.create(Value.Closure);
     c.* = .{
         .params = try arena.dupe([]const u8, params.items),
+        .rest = rest_name,
         .body = try arena.dupe(datum_mod.Datum, body.items),
         .env = scope,
     };
     return .{ .closure = c };
+}
+
+/// Binds a closure's formals to `args` in `child` (§2): fixed params
+/// positionally, extras as a list under the rest name.
+pub fn bindArgs(
+    arena: std.mem.Allocator,
+    c: *const Value.Closure,
+    args: []const Value,
+    child: *env_mod.Env,
+) error{ ArityMismatch, OutOfMemory }!void {
+    if (args.len < c.params.len) return error.ArityMismatch;
+    if (c.rest == null and args.len != c.params.len) return error.ArityMismatch;
+    for (c.params, args[0..c.params.len]) |name, v| try child.define(name, v);
+    if (c.rest) |rname| {
+        var list: Value = .empty_list;
+        var i = args.len;
+        while (i > c.params.len) {
+            i -= 1;
+            const p = try arena.create(Value.Pair);
+            p.* = .{ .car = args[i], .cdr = list };
+            list = .{ .pair = p };
+        }
+        try child.define(rname, list);
+    }
 }
 
 /// Deep-converts a reader Datum into a Value, copying bytes so the Value's
