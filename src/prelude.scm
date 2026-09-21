@@ -139,3 +139,15 @@
             (vector-set! p 1 #t)
             (vector-ref p 2)))
       p))
+
+;; multiple values (S2 Multiple values): opaque wrapper; a single value
+;; passes transparently; only call-with-values understands a package.
+(define (values . vs)
+  (if (and (pair? vs) (null? (cdr vs)))
+      (car vs)
+      (vector '%values vs)))
+(define (call-with-values producer consumer)
+  (let ((v (producer)))
+    (if (and (vector? v) (= (vector-length v) 2) (eq? (vector-ref v 0) '%values))
+        (apply consumer (vector-ref v 1))
+        (consumer v))))

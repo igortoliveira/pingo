@@ -1320,6 +1320,13 @@ test "differential: machine and oracle agree on a form corpus" {
         "(force (force (delay (delay 7))))",
         "(delay)",
         "(delay 1 2)",
+        // values/call-with-values (8H'.5): single value transparent
+        "(call-with-values (lambda () (values 1 2)) +)",
+        "(values 7)",
+        "(+ 1 (values 2))",
+        "(call-with-values (lambda () (values)) (lambda () 'none))",
+        "(call-with-values (lambda () 5) (lambda (x) (* x 2)))",
+        "(call-with-values (lambda () (values 1 2)) (lambda (x) x))",
         // rest args (8F'.4)
         "((lambda args args) 1 2 3)",
         "((lambda args args))",
