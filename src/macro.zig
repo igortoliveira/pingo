@@ -71,14 +71,22 @@ pub fn fromValue(v: value_mod.Value) *Macro {
     return @ptrCast(@alignCast(v.macro));
 }
 
-/// Parses `(syntax-rules (literal ...) (pattern template) ...)`. `form` is the
-/// whole `syntax-rules` datum. `def_env` is the scope where the macro is
-/// defined (hygiene b, 8I.4).
+/// Parses `(syntax-rules (literal ...) (pattern template) ...)` — or, with a
+/// custom ellipsis, `(syntax-rules ellipsis (literal ...) ...)` (tier 8I.6).
+/// `form` is the whole `syntax-rules` datum; `def_env` is the definition scope.
 pub fn parse(arena: std.mem.Allocator, form: Datum, def_env: *env_mod.Env) Error!*Macro {
     if (form != .pair or form.pair.car != .symbol or
         !std.mem.eql(u8, form.pair.car.symbol, "syntax-rules")) return error.BadSyntax;
     var rest = form.pair.cdr;
     if (rest != .pair) return error.BadSyntax;
+
+    // Custom ellipsis: a symbol in place of the literals list.
+    var ellipsis: []const u8 = "...";
+    if (rest.pair.car == .symbol) {
+        ellipsis = rest.pair.car.symbol;
+        rest = rest.pair.cdr;
+        if (rest != .pair) return error.BadSyntax;
+    }
 
     // literals list
     var literals: std.ArrayList([]const u8) = .empty;
@@ -109,7 +117,7 @@ pub fn parse(arena: std.mem.Allocator, form: Datum, def_env: *env_mod.Env) Error
     m.* = .{
         .literals = try arena.dupe([]const u8, literals.items),
         .rules = try arena.dupe(Rule, rules.items),
-        .ellipsis = "...",
+        .ellipsis = ellipsis,
         .def_env = def_env,
     };
     return m;
@@ -429,6 +437,22 @@ test "let-syntax and letrec-syntax (oracle)" {
     )).symbol);
 }
 
+test "syntax-rules custom ellipsis and escape (oracle)" {
+    var s = eval_mod.TestSession.init();
+    defer s.deinit();
+
+    // custom ellipsis: with ::: as the ellipsis, `...` is an ordinary var
+    try std.testing.expectEqual(@as(i64, 2), (try s.run(
+        "(let-syntax ((foo (syntax-rules ::: () ((foo ... args :::) (args ::: ...))))) (foo 3 - 5))",
+    )).integer);
+
+    // the (... x) escape emits a literal ellipsis into the output
+    _ = try s.run("(define-syntax lit (syntax-rules () ((_) (quote (a (... ...) b)))))");
+    const l = try s.run("(lit)");
+    try std.testing.expectEqualStrings("a", l.pair.car.symbol);
+    try std.testing.expectEqualStrings("...", l.pair.cdr.pair.car.symbol);
+}
+
 /// Copies `tmpl`, substituting pattern variables, expanding ellipses, and
 /// renaming introduced identifiers for hygiene (§8I.4). In `data` mode (inside
 /// a template `quote`) pattern vars and ellipses still apply, but literal
@@ -451,6 +475,9 @@ fn transcribe(ctx: *Ctx, tmpl: Datum, binds: *Bindings, data: bool) Error!Datum 
             if (!data and p.car == .symbol and std.mem.eql(u8, p.car.symbol, "quote") and
                 p.cdr == .pair)
                 return datum_mod.cons(arena, p.car, try transcribe(ctx, p.cdr, binds, true));
+            // Escape `(<ellipsis> tmpl)`: emit tmpl with ellipses literal.
+            if (isEllipsis(m, p.car) and p.cdr == .pair and p.cdr.pair.cdr == .empty_list)
+                return transcribeLiteral(ctx, p.cdr.pair.car, binds, data);
             // `sub ... rest`: expand sub once per matched element, then rest.
             if (p.cdr == .pair and isEllipsis(m, p.cdr.pair.car)) {
                 var depth: usize = 1;
@@ -482,6 +509,30 @@ fn transcribe(ctx: *Ctx, tmpl: Datum, binds: *Bindings, data: bool) Error!Datum 
             while (node == .pair) : (node = node.pair.cdr) try out.append(arena, node.pair.car);
             return .{ .vector = try out.toOwnedSlice(arena) };
         },
+        else => return tmpl,
+    }
+}
+
+/// Transcribes `tmpl` treating the ellipsis as an ordinary identifier (the
+/// `(... x)` escape): pattern vars and renaming still apply, ellipses do not.
+fn transcribeLiteral(ctx: *Ctx, tmpl: Datum, binds: *Bindings, data: bool) Error!Datum {
+    const arena = ctx.arena;
+    const m = ctx.m;
+    switch (tmpl) {
+        .symbol => |name| {
+            if (binds.get(name)) |b| {
+                if (b != .single) return error.BadSyntax;
+                return b.single;
+            }
+            if (data or isKeyword(name) or std.mem.eql(u8, name, "_") or isEllipsis(m, tmpl))
+                return tmpl;
+            return renameIntroduced(ctx, name);
+        },
+        .pair => |p| return datum_mod.cons(
+            arena,
+            try transcribeLiteral(ctx, p.car, binds, data),
+            try transcribeLiteral(ctx, p.cdr, binds, data),
+        ),
         else => return tmpl,
     }
 }

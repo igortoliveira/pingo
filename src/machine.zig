@@ -1671,6 +1671,9 @@ test "differential: machine and oracle agree on a form corpus" {
         "(let-syntax ((dbl (syntax-rules () ((_ x) (+ x x))))) (dbl 21))",
         "(let ((x 5)) (let-syntax ((g (syntax-rules () ((_) x)))) (g)))",
         "(letrec-syntax ((ev (syntax-rules () ((_ n) (if (= n 0) 't (od (- n 1)))))) (od (syntax-rules () ((_ n) (if (= n 0) 'f (ev (- n 1))))))) (ev 4))",
+        // custom ellipsis + escape (8I.6)
+        "(let-syntax ((foo (syntax-rules ::: () ((foo ... args :::) (args ::: ...))))) (foo 3 - 5))",
+        "(define-syntax lit (syntax-rules () ((_) (quote (a (... ...) b))))) (lit)",
         // internal defines (8H'.2): a body opening with defines is a letrec
         "((lambda () (define x 1) (define (f n) (if (= n 0) x (f (- n 1)))) (f 3)))",
         "(define (parity n) (define (e? k) (if (= k 0) #t (o? (- k 1)))) (define (o? k) (if (= k 0) #f (e? (- k 1)))) (e? n)) (parity 10)",

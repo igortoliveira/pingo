@@ -13,7 +13,7 @@ const Value = pingo.value.Value;
 
 const suite = @embedFile("vendor/chibi-scheme/r5rs-tests.scm");
 
-const special_forms = [_][]const u8{ "quote", "if", "define", "lambda", "begin", "let", "let*", "letrec", "do", "case", "cond", "and", "or", "else", "set!", "delay" };
+const special_forms = [_][]const u8{ "quote", "if", "define", "lambda", "begin", "let", "let*", "letrec", "do", "case", "cond", "and", "or", "else", "set!", "delay", "define-syntax", "let-syntax", "letrec-syntax" };
 
 pub fn main(init: std.process.Init) !void {
     var stdout_buffer: [4096]u8 = undefined;
@@ -67,7 +67,7 @@ pub fn main(init: std.process.Init) !void {
     if (fail > 0) std.process.exit(1);
     // Regression floor: raise this whenever new features convert skips to
     // passes; a drop means a feature silently stopped being recognized.
-    const pass_floor = 181;
+    const pass_floor = 183;
     if (pass < pass_floor) {
         std.debug.print("conformance: pass count {d} fell below the floor {d}\n", .{ pass, pass_floor });
         std.process.exit(1);
@@ -169,6 +169,26 @@ fn check(
             if (p.car == .symbol and std.mem.eql(u8, p.car.symbol, "quasiquote") and
                 p.cdr == .pair and p.cdr.pair.cdr == .empty_list)
                 return checkTemplate(arena, p.cdr.pair.car, 1, evaluator, bound);
+            if (p.car == .symbol and
+                (std.mem.eql(u8, p.car.symbol, "let-syntax") or std.mem.eql(u8, p.car.symbol, "letrec-syntax")) and
+                p.cdr == .pair)
+            {
+                // Bind the introduced keywords; the transformers are opaque
+                // syntax (not checked); the body is code.
+                const before = bound.items.len;
+                defer bound.shrinkRetainingCapacity(before);
+                var binds = p.cdr.pair.car;
+                while (binds == .pair) : (binds = binds.pair.cdr) {
+                    const b = binds.pair.car;
+                    if (b != .pair or b.pair.car != .symbol) return false;
+                    try bound.append(arena, b.pair.car.symbol);
+                }
+                var body = p.cdr.pair.cdr;
+                try bindBodyDefines(arena, body, bound);
+                while (body == .pair) : (body = body.pair.cdr)
+                    if (!try check(arena, body.pair.car, evaluator, bound)) return false;
+                return true;
+            }
             if (p.car == .symbol and std.mem.eql(u8, p.car.symbol, "case") and p.cdr == .pair) {
                 if (!try check(arena, p.cdr.pair.car, evaluator, bound)) return false;
                 var clauses = p.cdr.pair.cdr;
