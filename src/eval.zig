@@ -32,6 +32,11 @@ pub const Limits = struct {
     /// iterations). The counter is `fuel_used`; the host may reset it
     /// between feeds (e.g. a REPL giving each line a fresh budget).
     fuel: u64,
+    /// Nested (non-tail) evaluation depth. Guards the Zig stack: counts eval
+    /// recursion, which covers §5's non-tail call frames plus expression
+    /// nesting (a stricter measure than the doc's minimum — the latter is
+    /// already bounded by reader depth). Tail calls don't consume depth.
+    call_depth: usize,
 };
 
 /// Maps a runtime error to its §3 kind symbol. OutOfMemory is the host's
@@ -65,6 +70,7 @@ pub const Evaluator = struct {
     global: *Env,
     limits: Limits,
     fuel_used: u64 = 0,
+    depth: usize = 0,
     /// Set alongside the returned error when there is useful context.
     diagnostic: ?Diagnostic = null,
 
@@ -102,6 +108,13 @@ pub const Evaluator = struct {
     /// calls consume no Zig stack (semantics §5: proper tail calls are
     /// guaranteed). Non-tail subexpressions still recurse.
     pub fn eval(e: *Evaluator, d0: Datum, scope0: *Env) Error!Value {
+        if (e.depth >= e.limits.call_depth) {
+            e.diagnostic = .{ .context = "call-depth" };
+            return Error.LimitExceeded;
+        }
+        e.depth += 1;
+        defer e.depth -= 1;
+
         var d = d0;
         var scope = scope0;
         while (true) {
@@ -269,7 +282,7 @@ pub const TestSession = struct {
 
     /// Generous defaults so ordinary tests never trip limits; limit tests
     /// construct their own evaluator or shrink these.
-    pub const test_limits: Limits = .{ .fuel = 100_000_000 };
+    pub const test_limits: Limits = .{ .fuel = 100_000_000, .call_depth = 1_000 };
 
     /// Reads and evaluates every datum in `src`, returning the last result.
     /// The global environment persists across `run` calls within a session.
@@ -515,6 +528,24 @@ test "fuel counts work, not wall time" {
     const spent = s.evaluator.?.fuel_used - before;
     // (+ 1 (+ 2 3)): 7 evals — outer form, +, 1, inner form, +, 2, 3.
     try std.testing.expectEqual(@as(u64, 7), spent);
+}
+
+test "deep non-tail recursion hits the depth limit instead of the Zig stack" {
+    var s = TestSession.init();
+    defer s.deinit();
+    _ = try s.run("(define fact (lambda (n) (if (eq? n 0) 1 (* n (fact (- n 1))))))");
+    try std.testing.expectError(error.LimitExceeded, s.run("(fact 1000000)"));
+    try std.testing.expectEqualStrings("call-depth", s.evaluator.?.diagnostic.?.context);
+    // depth unwinds correctly: the session still evaluates
+    try std.testing.expectEqual(@as(i64, 120), (try s.run("(fact 5)")).integer);
+}
+
+test "tail calls do not consume depth" {
+    var s = TestSession.init();
+    defer s.deinit();
+    _ = try s.run("(define loop (lambda (n) (if (eq? n 0) 'done (loop (- n 1)))))");
+    s.evaluator.?.limits.call_depth = 16; // tiny; 100k tail iterations must still fit
+    try std.testing.expectEqualStrings("done", (try s.run("(loop 100000)")).symbol);
 }
 
 test "tail calls do not grow the stack" {
