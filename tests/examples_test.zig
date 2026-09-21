@@ -165,6 +165,113 @@ test "differential: opportunistic machine agrees with the sequential oracle" {
     }
 }
 
+/// Record→replay differential (9.3): a recording fully determines a run.
+/// Each program runs once with recording stubs (per-name results, one
+/// `(call ...)` line per settle), then again with stubs reconstructed from
+/// the trace headers serving the recorded results. Printed outcome and
+/// dispatch count must match.
+const RecTool = struct {
+    name: []const u8,
+    trace_out: *std.Io.Writer.Allocating,
+    calls: *usize,
+
+    fn handle(ctx: *anyopaque, arena: std.mem.Allocator, args: []const Value) pingo.capability.HostError!Value {
+        const t: *RecTool = @ptrCast(@alignCast(ctx));
+        t.calls.* += 1;
+        const text = std.fmt.allocPrint(arena, "{s}-result", .{t.name}) catch return error.OutOfMemory;
+        const result: Value = .{ .string = text };
+        pingo.trace.writeCall(&t.trace_out.writer, t.name, args, result) catch return error.OutOfMemory;
+        return result;
+    }
+};
+
+const ReplayTool = struct {
+    name: []const u8,
+    replay: *pingo.trace.Replay,
+    calls: *usize,
+
+    fn handle(ctx: *anyopaque, arena: std.mem.Allocator, args: []const Value) pingo.capability.HostError!Value {
+        const t: *ReplayTool = @ptrCast(@alignCast(ctx));
+        t.calls.* += 1;
+        const served = (try t.replay.next(arena, t.name, args)) orelse return error.HostError;
+        return switch (served) {
+            .ok => |v| v,
+            .failure => error.HostError,
+        };
+    }
+};
+
+fn runRecorded(src: []const u8, trace_out: *std.Io.Writer.Allocating, printed: *std.Io.Writer.Allocating) !usize {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var calls: usize = 0;
+    var tools: [stub_names.len]RecTool = undefined;
+    var caps: [stub_names.len]pingo.capability.Capability = undefined;
+    var machine = try pingo.machine.Machine.init(arena, .{ .fuel = 1_000_000, .call_depth = 500 });
+    for (stub_names, 0..) |name, i| {
+        try pingo.trace.writeTool(&trace_out.writer, name, .external_independent, 0);
+        tools[i] = .{ .name = name, .trace_out = trace_out, .calls = &calls };
+        caps[i] = .{ .name = name, .class = .external_independent, .ctx = &tools[i], .handler = RecTool.handle };
+        try pingo.capability.register(machine.global, &caps[i]);
+    }
+
+    var r = pingo.reader.Reader.init(arena, src, 32);
+    var last: pingo.value.Value = .unspecified;
+    while (try r.read()) |d| last = try machine.runToCompletion(d);
+    try pingo.printer.writeValue(last, &printed.writer);
+    return calls;
+}
+
+fn runReplayed(src: []const u8, trace_src: []const u8, printed: *std.Io.Writer.Allocating) !usize {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var replay = try pingo.trace.parse(arena, trace_src);
+    var calls: usize = 0;
+    // Capabilities come from the trace headers, as the replay runner does.
+    const tools = try arena.alloc(ReplayTool, replay.tools.len);
+    const caps = try arena.alloc(pingo.capability.Capability, replay.tools.len);
+    var machine = try pingo.machine.Machine.init(arena, .{ .fuel = 1_000_000, .call_depth = 500 });
+    for (replay.tools, tools, caps) |spec, *tool, *cap| {
+        tool.* = .{ .name = spec.name, .replay = &replay, .calls = &calls };
+        cap.* = .{ .name = spec.name, .class = spec.class, .ctx = tool, .handler = ReplayTool.handle };
+        try pingo.capability.register(machine.global, cap);
+    }
+
+    var r = pingo.reader.Reader.init(arena, src, 32);
+    var last: pingo.value.Value = .unspecified;
+    while (try r.read()) |d| last = try machine.runToCompletion(d);
+    try pingo.printer.writeValue(last, &printed.writer);
+    return calls;
+}
+
+test "differential: replay reproduces the recorded run" {
+    const programs = [_][]const u8{
+        @embedFile("examples/p1-fanout.scm"),
+        @embedFile("examples/p2-chain.scm"),
+        @embedFile("examples/p3-tree.scm"),
+        @embedFile("examples/p4-rag.scm"),
+        @embedFile("examples/p5-agent-loop.scm"),
+    };
+    const expected_calls = [_]usize{ 5, 4, 8, 6, 9 };
+
+    for (programs, expected_calls) |src, expected| {
+        var trace_out = std.Io.Writer.Allocating.init(std.testing.allocator);
+        defer trace_out.deinit();
+        var recorded = std.Io.Writer.Allocating.init(std.testing.allocator);
+        defer recorded.deinit();
+        try std.testing.expectEqual(expected, try runRecorded(src, &trace_out, &recorded));
+
+        var replayed = std.Io.Writer.Allocating.init(std.testing.allocator);
+        defer replayed.deinit();
+        try std.testing.expectEqual(expected, try runReplayed(src, trace_out.written(), &replayed));
+        try std.testing.expectEqualStrings(recorded.written(), replayed.written());
+    }
+}
+
 test "p2 chain: 4 sequential calls" {
     try expectCalls(@embedFile("examples/p2-chain.scm"), 4);
 }
