@@ -99,7 +99,94 @@ const table = [_]Value.Primitive{
     .{ .name = "string<=?", .func = strLe },
     .{ .name = "string>=?", .func = strGe },
     .{ .name = "string-ci=?", .func = strCiEq },
+    .{ .name = "symbol?", .func = isSymbol },
+    .{ .name = "symbol->string", .func = symbolToString },
+    .{ .name = "string->symbol", .func = stringToSymbol },
+    .{ .name = "number->string", .func = numberToString },
+    .{ .name = "string->number", .func = stringToNumber },
+    .{ .name = "boolean?", .func = isBoolean },
+    .{ .name = "procedure?", .func = isProcedure },
 };
+
+fn isSymbol(_: std.mem.Allocator, args: []const Value) PrimitiveError!Value {
+    try exactly(args, 1);
+    return .{ .boolean = args[0] == .symbol };
+}
+
+fn isBoolean(_: std.mem.Allocator, args: []const Value) PrimitiveError!Value {
+    try exactly(args, 1);
+    return .{ .boolean = args[0] == .boolean };
+}
+
+fn isProcedure(_: std.mem.Allocator, args: []const Value) PrimitiveError!Value {
+    try exactly(args, 1);
+    return .{ .boolean = switch (args[0]) {
+        .closure, .primitive, .capability => true,
+        else => false,
+    } };
+}
+
+fn symbolToString(arena: std.mem.Allocator, args: []const Value) PrimitiveError!Value {
+    try exactly(args, 1);
+    if (args[0] != .symbol) return error.TypeError;
+    return .{ .string = try arena.dupe(u8, args[0].symbol) };
+}
+
+fn stringToSymbol(arena: std.mem.Allocator, args: []const Value) PrimitiveError!Value {
+    try exactly(args, 1);
+    return .{ .symbol = try arena.dupe(u8, try asString(args[0])) };
+}
+
+fn radixOf(args: []const Value) PrimitiveError!u8 {
+    if (args.len == 1) return 10;
+    const r = try asInt(args[1]);
+    return switch (r) {
+        2, 8, 10, 16 => @intCast(r),
+        else => error.TypeError,
+    };
+}
+
+fn numberToString(arena: std.mem.Allocator, args: []const Value) PrimitiveError!Value {
+    if (args.len < 1 or args.len > 2) return error.ArityMismatch;
+    const radix = try radixOf(args);
+    switch (args[0]) {
+        .integer => |n| {
+            const text = switch (radix) {
+                10 => try std.fmt.allocPrint(arena, "{d}", .{n}),
+                2 => try std.fmt.allocPrint(arena, "{b}", .{n}),
+                8 => try std.fmt.allocPrint(arena, "{o}", .{n}),
+                16 => try std.fmt.allocPrint(arena, "{x}", .{n}),
+                else => unreachable,
+            };
+            return .{ .string = text };
+        },
+        .real => |x| {
+            if (radix != 10) return error.TypeError; // R5RS: inexact needs radix 10
+            var out = std.Io.Writer.Allocating.init(arena);
+            printer_mod.writeReal(x, &out.writer) catch return error.OutOfMemory;
+            return .{ .string = out.toOwnedSlice() catch return error.OutOfMemory };
+        },
+        else => return error.TypeError,
+    }
+}
+
+/// R5RS: an unparsable string yields #f, not an error.
+fn stringToNumber(_: std.mem.Allocator, args: []const Value) PrimitiveError!Value {
+    if (args.len < 1 or args.len > 2) return error.ArityMismatch;
+    const s = try asString(args[0]);
+    const radix = try radixOf(args);
+    if (s.len == 0) return .{ .boolean = false };
+    if (std.fmt.parseInt(i64, s, radix)) |n| return .{ .integer = n } else |_| {}
+    if (radix == 10) {
+        // reject symbol-ish inputs parseFloat would take (e.g. "inf")
+        var has_digit = false;
+        for (s) |c| has_digit = has_digit or std.ascii.isDigit(c);
+        if (has_digit) if (std.fmt.parseFloat(f64, s)) |x| return .{ .real = x } else |_| {};
+    }
+    return .{ .boolean = false };
+}
+
+const printer_mod = @import("printer.zig");
 
 fn asString(v: Value) PrimitiveError![]u8 {
     return if (v == .string) v.string else error.TypeError;

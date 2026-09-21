@@ -1235,6 +1235,14 @@ test "differential: machine and oracle agree on a form corpus" {
         "(list (string=? \"a\" \"a\") (string<? \"abc\" \"abd\") (string>=? \"b\" \"a\"))",
         "(string-ci=? \"AbC\" \"abc\")",
         "(string-ref \"abc\" 9)",
+        // conversions (8D.5)
+        "(symbol->string 'flying-fish)",
+        "(string->symbol \"pingo\")",
+        "(eq? 'abc (string->symbol \"abc\"))",
+        "(list (number->string 42) (number->string 255 16) (number->string 5 2) (number->string 1.5))",
+        "(list (string->number \"42\") (string->number \"1e2\") (string->number \"ff\" 16) (string->number \"nope\"))",
+        "(string->number \"\")",
+        "(list (symbol? 'a) (symbol? \"a\") (boolean? #f) (procedure? car) (procedure? 'car))",
         // cond/and/or (7.3): short-circuit means untaken positions may be unbound
         "(cond (#f 1) ((eq? 1 1) 'hit) (else 'miss))",
         "(cond (#f 1))",
