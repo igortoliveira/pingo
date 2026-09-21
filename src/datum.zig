@@ -9,6 +9,7 @@ const std = @import("std");
 
 pub const Datum = union(enum) {
     integer: i64,
+    real: f64,
     boolean: bool,
     symbol: []const u8,
     string: []const u8, // decoded bytes (escapes already resolved)

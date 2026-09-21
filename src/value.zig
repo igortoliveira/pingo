@@ -23,6 +23,7 @@ pub const PrimitiveError = error{
 
 pub const Value = union(enum) {
     integer: i64,
+    real: f64,
     boolean: bool,
     symbol: []const u8,
     string: []const u8,
@@ -83,7 +84,7 @@ pub fn isTruthy(v: Value) bool {
 /// §4: pure data — no procedures or capabilities anywhere in the tree.
 pub fn isPureData(v: Value) bool {
     return switch (v) {
-        .integer, .boolean, .symbol, .string, .empty_list, .unspecified => true,
+        .integer, .real, .boolean, .symbol, .string, .empty_list, .unspecified => true,
         .pair => |p| isPureData(p.car) and isPureData(p.cdr),
         .closure, .primitive, .capability => false,
         // Deep force substitutes resolved pendings before this check runs.
@@ -169,6 +170,7 @@ pub fn bindArgs(
 pub fn fromDatum(arena: std.mem.Allocator, d: datum_mod.Datum) std.mem.Allocator.Error!Value {
     return switch (d) {
         .integer => |n| .{ .integer = n },
+        .real => |x| .{ .real = x },
         .boolean => |b| .{ .boolean = b },
         .symbol => |s| .{ .symbol = try arena.dupe(u8, s) },
         .string => |s| .{ .string = try arena.dupe(u8, s) },

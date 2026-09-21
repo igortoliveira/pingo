@@ -10,6 +10,7 @@ const Datum = datum_mod.Datum;
 pub fn write(d: Datum, w: *std.Io.Writer) std.Io.Writer.Error!void {
     switch (d) {
         .integer => |n| try w.print("{d}", .{n}),
+        .real => |x| try writeReal(x, w),
         .boolean => |b| try w.writeAll(if (b) "#t" else "#f"),
         .symbol => |s| try w.writeAll(s),
         .string => |s| try writeString(s, w),
@@ -39,6 +40,7 @@ const Value = value_mod.Value;
 pub fn writeValue(v: Value, w: *std.Io.Writer) std.Io.Writer.Error!void {
     switch (v) {
         .integer => |n| try w.print("{d}", .{n}),
+        .real => |x| try writeReal(x, w),
         .boolean => |b| try w.writeAll(if (b) "#t" else "#f"),
         .symbol => |s| try w.writeAll(s),
         .string => |s| try writeString(s, w),
@@ -63,6 +65,16 @@ pub fn writeValue(v: Value, w: *std.Io.Writer) std.Io.Writer.Error!void {
             try w.writeByte(')');
         },
     }
+}
+
+/// Reals print re-readably: integral values keep a `.0`, non-finite values
+/// use the conventional spellings (not readable by v0's reader — noted §1).
+pub fn writeReal(x: f64, w: *std.Io.Writer) std.Io.Writer.Error!void {
+    if (std.math.isNan(x)) return w.writeAll("+nan.0");
+    if (std.math.isInf(x)) return w.writeAll(if (x > 0) "+inf.0" else "-inf.0");
+    if (@floor(x) == x and @abs(x) < 1e15)
+        return w.print("{d}.0", .{@as(i64, @intFromFloat(x))});
+    try w.print("{d}", .{x});
 }
 
 fn writeString(s: []const u8, w: *std.Io.Writer) std.Io.Writer.Error!void {
@@ -135,6 +147,17 @@ test "writeValue covers runtime-only values" {
 }
 
 const eval_mod = @import("eval.zig");
+
+test "reals print re-readably" {
+    var out = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer out.deinit();
+    try writeValue(.{ .real = 3.5 }, &out.writer);
+    try out.writer.writeByte(' ');
+    try writeValue(.{ .real = 4.0 }, &out.writer);
+    try out.writer.writeByte(' ');
+    try writeValue(.{ .real = -0.25 }, &out.writer);
+    try std.testing.expectEqualStrings("3.5 4.0 -0.25", out.written());
+}
 
 test "improper list prints with dot" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);

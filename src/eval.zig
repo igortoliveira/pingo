@@ -144,6 +144,7 @@ pub const Evaluator = struct {
             switch (d) {
                 // Self-evaluating literals (semantics §2).
                 .integer => |n| return .{ .integer = n },
+                .real => |x| return .{ .real = x },
                 .boolean => |b| return .{ .boolean = b },
                 .string => |s| return .{ .string = try e.arena.dupe(u8, s) },
                 // () is not a valid expression, only a value produced by quote.

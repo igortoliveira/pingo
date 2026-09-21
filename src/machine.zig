@@ -233,6 +233,7 @@ pub const Machine = struct {
     fn stepExpr(m: *Machine, x: Expr) Error!Control {
         switch (x.d) {
             .integer => |n| return .{ .value = .{ .integer = n } },
+            .real => |r| return .{ .value = .{ .real = r } },
             .boolean => |b| return .{ .value = .{ .boolean = b } },
             .string => |s| return .{ .value = .{ .string = try m.arena.dupe(u8, s) } },
             .empty_list => return Error.BadSyntax,

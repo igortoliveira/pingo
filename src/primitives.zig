@@ -239,6 +239,8 @@ pub fn eqValues(a: Value, b: Value) bool {
     if (@as(std.meta.Tag(Value), a) != @as(std.meta.Tag(Value), b)) return false;
     return switch (a) {
         .integer => a.integer == b.integer,
+        // R5RS eqv?: both inexact and numerically equal (NaN != NaN).
+        .real => a.real == b.real,
         .boolean => a.boolean == b.boolean,
         .symbol => std.mem.eql(u8, a.symbol, b.symbol),
         .string => a.string.ptr == b.string.ptr and a.string.len == b.string.len,
