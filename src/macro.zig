@@ -133,6 +133,24 @@ pub fn lookupMacro(form: Datum, env: *const env_mod.Env) ?*Macro {
     return if (v == .macro) fromValue(v) else null;
 }
 
+/// Binds the `((kw transformer) ...)` of a `let-syntax`/`letrec-syntax` into
+/// `target` (the body scope). Transformers see `def_env`: the outer scope for
+/// `let-syntax`, the body scope itself for `letrec-syntax` (§2, tier 8I.5).
+/// Returns the body datum list (after the bindings).
+pub fn bindSyntax(arena: std.mem.Allocator, rest: Datum, target: *env_mod.Env, def_env: *env_mod.Env) Error!Datum {
+    if (rest != .pair) return error.BadSyntax; // ((kw tx) ...) body ...
+    var b = rest.pair.car;
+    while (b == .pair) : (b = b.pair.cdr) {
+        const binding = b.pair.car;
+        if (binding != .pair or binding.pair.car != .symbol) return error.BadSyntax;
+        if (binding.pair.cdr != .pair or binding.pair.cdr.pair.cdr != .empty_list) return error.BadSyntax;
+        const m = try parse(arena, binding.pair.cdr.pair.car, def_env);
+        try target.define(binding.pair.car.symbol, toValue(m));
+    }
+    if (b != .empty_list) return error.BadSyntax;
+    return rest.pair.cdr; // the body
+}
+
 /// A matched pattern variable's value, carrying ellipsis depth: a `single`
 /// datum at depth 0, or a `seq` of sub-matches per enclosing ellipsis level.
 const Match = union(enum) { single: Datum, seq: []Match };
@@ -384,6 +402,31 @@ test "syntax-rules hygiene (oracle)" {
     // quoted data is never renamed
     _ = try s.run("(define-syntax tagq (syntax-rules () ((_) 'lit)))");
     try std.testing.expectEqualStrings("lit", (try s.run("(tagq)")).symbol);
+}
+
+test "let-syntax and letrec-syntax (oracle)" {
+    var s = eval_mod.TestSession.init();
+    defer s.deinit();
+
+    // local keyword, scoped to the body
+    try std.testing.expectEqual(@as(i64, 42), (try s.run(
+        "(let-syntax ((dbl (syntax-rules () ((_ x) (+ x x))))) (dbl 21))",
+    )).integer);
+    // the keyword is not visible outside the let-syntax
+    try std.testing.expectError(error.UnboundVariable, s.run("(dbl 1)"));
+
+    // let-syntax transformer sees the use site's lexical bindings
+    try std.testing.expectEqual(@as(i64, 10), (try s.run(
+        "(let ((x 10)) (let-syntax ((g (syntax-rules () ((_) x)))) (g)))",
+    )).integer);
+
+    // letrec-syntax: mutually recursive transformers
+    try std.testing.expectEqualStrings("even", (try s.run(
+        \\(letrec-syntax
+        \\  ((ev (syntax-rules () ((_ n) (if (= n 0) 'even (od (- n 1))))))
+        \\   (od (syntax-rules () ((_ n) (if (= n 0) 'odd (ev (- n 1)))))))
+        \\  (ev 4))
+    )).symbol);
 }
 
 /// Copies `tmpl`, substituting pattern variables, expanding ellipses, and

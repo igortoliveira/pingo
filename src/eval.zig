@@ -297,6 +297,20 @@ pub const Evaluator = struct {
                         continue;
                     }
                     if (isForm(p, "define-syntax")) return Error.BadSyntax; // top/body only (§2)
+                    if (isForm(p, "let-syntax") or isForm(p, "letrec-syntax")) {
+                        const recursive = std.mem.eql(u8, p.car.symbol, "letrec-syntax");
+                        const child = try Env.init(e.arena, scope);
+                        const body0 = try macro_mod.bindSyntax(e.arena, p.cdr, child, if (recursive) child else scope);
+                        var check = body0;
+                        while (check == .pair) : (check = check.pair.cdr) {}
+                        if (body0 != .pair or check != .empty_list) return Error.BadSyntax;
+                        var body = try expand.rewriteBody(e.arena, body0);
+                        while (body.pair.cdr == .pair) : (body = body.pair.cdr)
+                            _ = try e.eval(body.pair.car, child);
+                        d = body.pair.car; // tail position
+                        scope = child;
+                        continue;
+                    }
 
                     // Macro use (§2, tier 8I): a keyword bound in scope expands
                     // and re-evaluates. Core/derived forms above take precedence.

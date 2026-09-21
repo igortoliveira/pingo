@@ -459,6 +459,15 @@ pub const Machine = struct {
                 if (isForm(p, "or"))
                     return .{ .expr = .{ .d = try expand.expandOr(m.arena, p.cdr), .env = x.env } };
                 if (isForm(p, "define-syntax")) return Error.BadSyntax; // top/body only (§2)
+                if (isForm(p, "let-syntax") or isForm(p, "letrec-syntax")) {
+                    const recursive = std.mem.eql(u8, p.car.symbol, "letrec-syntax");
+                    const child = try Env.init(m.arena, x.env);
+                    const body = try macro_mod.bindSyntax(m.arena, p.cdr, child, if (recursive) child else x.env);
+                    var check = body;
+                    while (check == .pair) : (check = check.pair.cdr) {}
+                    if (body != .pair or check != .empty_list) return Error.BadSyntax;
+                    return m.enterSequence(try expand.rewriteBody(m.arena, body), child);
+                }
 
                 // Macro use (§2, tier 8I): a keyword bound in scope expands and
                 // re-evaluates. Core/derived forms above take precedence.
@@ -1658,6 +1667,10 @@ test "differential: machine and oracle agree on a form corpus" {
         // hygiene (8I.4): introduced tmp does not capture; quoted data literal
         "(define-syntax sw (syntax-rules () ((_ a b) (let ((tmp a)) (set! a b) (set! b tmp))))) (define p 1) (define tmp 2) (sw p tmp) (list p tmp)",
         "(define-syntax tq (syntax-rules () ((_) 'lit))) (tq)",
+        // let-syntax / letrec-syntax (8I.5)
+        "(let-syntax ((dbl (syntax-rules () ((_ x) (+ x x))))) (dbl 21))",
+        "(let ((x 5)) (let-syntax ((g (syntax-rules () ((_) x)))) (g)))",
+        "(letrec-syntax ((ev (syntax-rules () ((_ n) (if (= n 0) 't (od (- n 1)))))) (od (syntax-rules () ((_ n) (if (= n 0) 'f (ev (- n 1))))))) (ev 4))",
         // internal defines (8H'.2): a body opening with defines is a letrec
         "((lambda () (define x 1) (define (f n) (if (= n 0) x (f (- n 1)))) (f 3)))",
         "(define (parity n) (define (e? k) (if (= k 0) #t (o? (- k 1)))) (define (o? k) (if (= k 0) #f (e? (- k 1)))) (e? n)) (parity 10)",
