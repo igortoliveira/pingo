@@ -483,8 +483,9 @@ test "arithmetic" {
     try std.testing.expectEqual(@as(i64, -5), (try s.run("(- 5)")).integer);
     try std.testing.expectEqual(@as(i64, 24), (try s.run("(* 2 3 4)")).integer);
     try std.testing.expectEqual(@as(i64, 1), (try s.run("(*)")).integer);
-    try std.testing.expectEqual(@as(i64, 3), (try s.run("(/ 7 2)")).integer);
-    try std.testing.expectEqual(@as(i64, -3), (try s.run("(/ -7 2)")).integer); // truncating
+    try std.testing.expectEqual(@as(i64, 3), (try s.run("(/ 6 2)")).integer); // exact stays exact
+    try std.testing.expectEqual(@as(f64, 3.5), (try s.run("(/ 7 2)")).real); // else real (§1)
+    try std.testing.expectEqual(@as(f64, 5.0), (try s.run("(+ 1 1.5 2.5)")).real); // contagion
     try std.testing.expectEqual(@as(i64, 7), (try s.run("((lambda (x) (+ x 3)) 4)")).integer);
 }
 
@@ -497,7 +498,8 @@ test "arithmetic errors follow §3" {
     try std.testing.expectError(error.ArityMismatch, s.run("(/ 1)"));
     try std.testing.expectError(error.IntegerOverflow, s.run("(+ 9223372036854775807 1)"));
     try std.testing.expectError(error.IntegerOverflow, s.run("(- -9223372036854775808)"));
-    try std.testing.expectError(error.IntegerOverflow, s.run("(/ -9223372036854775808 -1)"));
+    // minInt / -1 cannot stay exact: contagion promotes instead of overflowing
+    try std.testing.expect((try s.run("(/ -9223372036854775808 -1)")) == .real);
 }
 
 test "primitives are first-class values" {

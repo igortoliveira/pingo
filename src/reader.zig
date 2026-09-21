@@ -45,6 +45,11 @@ pub const Reader = struct {
                 };
                 return .{ .integer = n };
             },
+            .real => {
+                const text = r.lexer.src[tok.start..tok.end];
+                const x = std.fmt.parseFloat(f64, text) catch unreachable; // lexer shape guarantees
+                return .{ .real = x };
+            },
             .boolean => return .{ .boolean = r.lexer.src[tok.start + 1] == 't' },
             .symbol => {
                 const text = r.lexer.src[tok.start..tok.end];
@@ -187,6 +192,17 @@ test "depth limit" {
     var t2 = TestReader.init();
     defer t2.deinit();
     _ = (try t2.start("(((1)))", 3).read()).?; // exactly at the limit is fine
+}
+
+test "real atoms" {
+    var t = TestReader.init();
+    defer t.deinit();
+    const r = t.start("3.5 -0.25 1e3 (1 . 2)", 8);
+    try std.testing.expectEqual(@as(f64, 3.5), (try r.read()).?.real);
+    try std.testing.expectEqual(@as(f64, -0.25), (try r.read()).?.real);
+    try std.testing.expectEqual(@as(f64, 1000.0), (try r.read()).?.real);
+    const d = (try r.read()).?; // dotted pairs still work
+    try std.testing.expectEqual(@as(i64, 2), d.pair.cdr.integer);
 }
 
 test "dotted pairs" {

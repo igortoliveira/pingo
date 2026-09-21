@@ -13,6 +13,7 @@ pub const Token = struct {
         rparen,
         quote, // '
         integer,
+        real, // has a fraction and/or exponent part
         symbol,
         boolean, // #t or #f; which one is in the source text
         string, // includes the surrounding quotes; escapes are decoded by the reader
@@ -54,6 +55,11 @@ pub const Lexer = struct {
             },
             '#' => return l.boolean(start),
             '"' => return l.string(start),
+            '.' => {
+                if (l.pos + 1 < l.src.len and isDigit(l.src[l.pos + 1]))
+                    return l.dotReal(start);
+                return l.symbol(start); // `.` in dotted pairs, or a symbol
+            },
             else => {
                 if (isSymbolInitial(l.src[l.pos])) return l.symbol(start);
                 return l.single(.invalid, start);
@@ -68,7 +74,35 @@ pub const Lexer = struct {
 
     fn integer(l: *Lexer, start: usize) Token {
         while (l.pos < l.src.len and isDigit(l.src[l.pos])) l.pos += 1;
-        return .{ .tag = .integer, .start = start, .end = l.pos };
+        var is_real = false;
+        // fraction: `.` must be followed by a digit (a bare dot belongs to
+        // dotted-pair syntax)
+        if (l.pos + 1 < l.src.len and l.src[l.pos] == '.' and isDigit(l.src[l.pos + 1])) {
+            is_real = true;
+            l.pos += 1;
+            while (l.pos < l.src.len and isDigit(l.src[l.pos])) l.pos += 1;
+        }
+        if (l.consumeExponent()) is_real = true;
+        return .{ .tag = if (is_real) .real else .integer, .start = start, .end = l.pos };
+    }
+
+    /// `.5`-style real (no integer part); `start` is at the dot.
+    fn dotReal(l: *Lexer, start: usize) Token {
+        l.pos += 1; // consume '.'
+        while (l.pos < l.src.len and isDigit(l.src[l.pos])) l.pos += 1;
+        _ = l.consumeExponent();
+        return .{ .tag = .real, .start = start, .end = l.pos };
+    }
+
+    /// Consumes `e[+-]?digits` only when fully present.
+    fn consumeExponent(l: *Lexer) bool {
+        if (l.pos >= l.src.len or (l.src[l.pos] != 'e' and l.src[l.pos] != 'E')) return false;
+        var probe = l.pos + 1;
+        if (probe < l.src.len and (l.src[probe] == '+' or l.src[probe] == '-')) probe += 1;
+        if (probe >= l.src.len or !isDigit(l.src[probe])) return false;
+        l.pos = probe;
+        while (l.pos < l.src.len and isDigit(l.src[l.pos])) l.pos += 1;
+        return true;
     }
 
     fn symbol(l: *Lexer, start: usize) Token {
@@ -207,6 +241,14 @@ test "string escapes" {
 test "unterminated string is invalid, not a hang" {
     try expectTokens("\"abc", &.{.invalid});
     try expectTokens("\"abc\\", &.{.invalid});
+}
+
+test "reals" {
+    try expectTokens("3.14 -2.5 .5 1e3 1.5e-2 2E+4", &.{ .real, .real, .real, .real, .real, .real });
+    // a bare dot stays a symbol (dotted pairs); incomplete exponents split
+    try expectTokens("1 . 2", &.{ .integer, .symbol, .integer });
+    try expectTokens("1e", &.{ .integer, .symbol });
+    try expectTokens("1.e3", &.{ .integer, .symbol });
 }
 
 test "quote" {

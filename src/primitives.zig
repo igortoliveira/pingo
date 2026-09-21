@@ -53,55 +53,80 @@ const table = [_]Value.Primitive{
     .{ .name = "equal?", .func = equalPred },
 };
 
-fn compare(args: []const Value, comptime ok: fn (i64, i64) bool) PrimitiveError!Value {
+/// Numeric contagion (§1): integer with integer stays exact; anything
+/// touching a real goes through f64.
+const Num = union(enum) {
+    int: i64,
+    real: f64,
+
+    fn of(v: Value) PrimitiveError!Num {
+        return switch (v) {
+            .integer => |n| .{ .int = n },
+            .real => |x| .{ .real = x },
+            else => error.TypeError,
+        };
+    }
+
+    fn toF(n: Num) f64 {
+        return switch (n) {
+            .int => |i| @floatFromInt(i),
+            .real => |x| x,
+        };
+    }
+
+    fn value(n: Num) Value {
+        return switch (n) {
+            .int => |i| .{ .integer = i },
+            .real => |x| .{ .real = x },
+        };
+    }
+};
+
+const Cmp = enum { eq, lt, gt, le, ge };
+
+fn compare(args: []const Value, comptime op: Cmp) PrimitiveError!Value {
     if (args.len < 2) return error.ArityMismatch;
-    var prev = try asInt(args[0]);
+    var prev = try Num.of(args[0]);
     for (args[1..]) |a| {
-        const cur = try asInt(a);
-        if (!ok(prev, cur)) return .{ .boolean = false };
+        const cur = try Num.of(a);
+        const good = if (prev == .int and cur == .int) switch (op) {
+            .eq => prev.int == cur.int,
+            .lt => prev.int < cur.int,
+            .gt => prev.int > cur.int,
+            .le => prev.int <= cur.int,
+            .ge => prev.int >= cur.int,
+        } else switch (op) {
+            // mixed comparisons pass through f64 (§1: 2^53 restriction)
+            .eq => prev.toF() == cur.toF(),
+            .lt => prev.toF() < cur.toF(),
+            .gt => prev.toF() > cur.toF(),
+            .le => prev.toF() <= cur.toF(),
+            .ge => prev.toF() >= cur.toF(),
+        };
+        if (!good) return .{ .boolean = false };
         prev = cur;
     }
     return .{ .boolean = true };
 }
 
 fn numEq(_: std.mem.Allocator, args: []const Value) PrimitiveError!Value {
-    return compare(args, struct {
-        fn f(a: i64, b: i64) bool {
-            return a == b;
-        }
-    }.f);
+    return compare(args, .eq);
 }
 
 fn lt(_: std.mem.Allocator, args: []const Value) PrimitiveError!Value {
-    return compare(args, struct {
-        fn f(a: i64, b: i64) bool {
-            return a < b;
-        }
-    }.f);
+    return compare(args, .lt);
 }
 
 fn gt(_: std.mem.Allocator, args: []const Value) PrimitiveError!Value {
-    return compare(args, struct {
-        fn f(a: i64, b: i64) bool {
-            return a > b;
-        }
-    }.f);
+    return compare(args, .gt);
 }
 
 fn le(_: std.mem.Allocator, args: []const Value) PrimitiveError!Value {
-    return compare(args, struct {
-        fn f(a: i64, b: i64) bool {
-            return a <= b;
-        }
-    }.f);
+    return compare(args, .le);
 }
 
 fn ge(_: std.mem.Allocator, args: []const Value) PrimitiveError!Value {
-    return compare(args, struct {
-        fn f(a: i64, b: i64) bool {
-            return a >= b;
-        }
-    }.f);
+    return compare(args, .ge);
 }
 
 /// §2 "Equivalence predicates": eqv? is identical to eq? in v0.
@@ -185,25 +210,75 @@ fn asInt(v: Value) PrimitiveError!i64 {
     };
 }
 
+fn accumulate(
+    args: []const Value,
+    start: Num,
+    comptime intOp: fn (i64, i64) error{Overflow}!i64,
+    comptime realOp: fn (f64, f64) f64,
+) PrimitiveError!Value {
+    var acc = start;
+    for (args) |a| {
+        const cur = try Num.of(a);
+        if (acc == .int and cur == .int) {
+            const r = intOp(acc.int, cur.int) catch return error.IntegerOverflow;
+            acc = .{ .int = r };
+        } else {
+            // note: compute first — `acc = .{ .real = f(acc...) }` may clobber
+            // acc before reading it (result location semantics)
+            const r = realOp(acc.toF(), cur.toF());
+            acc = .{ .real = r };
+        }
+    }
+    return acc.value();
+}
+
+const addI = struct {
+    fn f(a: i64, b: i64) error{Overflow}!i64 {
+        return std.math.add(i64, a, b);
+    }
+}.f;
+const subI = struct {
+    fn f(a: i64, b: i64) error{Overflow}!i64 {
+        return std.math.sub(i64, a, b);
+    }
+}.f;
+const mulI = struct {
+    fn f(a: i64, b: i64) error{Overflow}!i64 {
+        return std.math.mul(i64, a, b);
+    }
+}.f;
+const addR = struct {
+    fn f(a: f64, b: f64) f64 {
+        return a + b;
+    }
+}.f;
+const subR = struct {
+    fn f(a: f64, b: f64) f64 {
+        return a - b;
+    }
+}.f;
+const mulR = struct {
+    fn f(a: f64, b: f64) f64 {
+        return a * b;
+    }
+}.f;
+
 fn add(_: std.mem.Allocator, args: []const Value) PrimitiveError!Value {
-    var acc: i64 = 0;
-    for (args) |a| acc = std.math.add(i64, acc, try asInt(a)) catch return error.IntegerOverflow;
-    return .{ .integer = acc };
+    return accumulate(args, .{ .int = 0 }, addI, addR);
 }
 
 fn sub(_: std.mem.Allocator, args: []const Value) PrimitiveError!Value {
     if (args.len == 0) return error.ArityMismatch;
-    var acc = try asInt(args[0]);
-    if (args.len == 1) // unary negation
-        return .{ .integer = std.math.negate(acc) catch return error.IntegerOverflow };
-    for (args[1..]) |a| acc = std.math.sub(i64, acc, try asInt(a)) catch return error.IntegerOverflow;
-    return .{ .integer = acc };
+    const first = try Num.of(args[0]);
+    if (args.len == 1) return switch (first) { // unary negation
+        .int => |i| .{ .integer = std.math.negate(i) catch return error.IntegerOverflow },
+        .real => |x| .{ .real = -x },
+    };
+    return accumulate(args[1..], first, subI, subR);
 }
 
 fn mul(_: std.mem.Allocator, args: []const Value) PrimitiveError!Value {
-    var acc: i64 = 1;
-    for (args) |a| acc = std.math.mul(i64, acc, try asInt(a)) catch return error.IntegerOverflow;
-    return .{ .integer = acc };
+    return accumulate(args, .{ .int = 1 }, mulI, mulR);
 }
 
 fn cons(arena: std.mem.Allocator, args: []const Value) PrimitiveError!Value {
@@ -258,14 +333,25 @@ fn eq(_: std.mem.Allocator, args: []const Value) PrimitiveError!Value {
     return .{ .boolean = eqValues(args[0], args[1]) };
 }
 
-/// v0 `/` is truncating integer division (only integers exist, §1).
+/// §1: `/` stays exact only while every step divides exactly; otherwise the
+/// result is real. Division by an exact zero errors; by an inexact zero it
+/// follows IEEE. Truncating integer division is `quotient` (tier 8B.6).
 fn div(_: std.mem.Allocator, args: []const Value) PrimitiveError!Value {
     if (args.len < 2) return error.ArityMismatch;
-    var acc = try asInt(args[0]);
+    var acc = try Num.of(args[0]);
     for (args[1..]) |a| {
-        const d = try asInt(a);
-        if (d == 0) return error.DivideByZero;
-        acc = std.math.divTrunc(i64, acc, d) catch return error.IntegerOverflow;
+        const d = try Num.of(a);
+        if (d == .int and d.int == 0) return error.DivideByZero;
+        if (acc == .int and d == .int and
+            @rem(acc.int, d.int) == 0 and
+            !(acc.int == std.math.minInt(i64) and d.int == -1))
+        {
+            const q = @divExact(acc.int, d.int);
+            acc = .{ .int = q };
+        } else {
+            const q = acc.toF() / d.toF();
+            acc = .{ .real = q };
+        }
     }
-    return .{ .integer = acc };
+    return acc.value();
 }
