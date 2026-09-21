@@ -97,12 +97,9 @@ pub const Evaluator = struct {
     pub fn evalToplevel(e: *Evaluator, d: Datum) Error!Value {
         e.diagnostic = null;
         if (d == .pair and isForm(d.pair, "define")) {
-            const args = d.pair.cdr;
-            if (args != .pair or args.pair.car != .symbol) return Error.BadSyntax;
-            if (args.pair.cdr != .pair or args.pair.cdr.pair.cdr != .empty_list)
-                return Error.BadSyntax;
-            const v = try e.eval(args.pair.cdr.pair.car, e.global);
-            try e.global.define(args.pair.car.symbol, v);
+            const parts = try expand.defineParts(e.arena, d.pair.cdr);
+            const v = try e.eval(parts.expr, e.global);
+            try e.global.define(parts.name, v);
             return .unspecified;
         }
         return e.eval(d, e.global);

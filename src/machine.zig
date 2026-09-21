@@ -93,11 +93,8 @@ pub const Machine = struct {
         m.feed_calls.clearRetainingCapacity();
         m.diagnostic = null;
         if (d == .pair and isForm(d.pair, "define")) {
-            const args = d.pair.cdr;
-            if (args != .pair or args.pair.car != .symbol) return Error.BadSyntax;
-            if (args.pair.cdr != .pair or args.pair.cdr.pair.cdr != .empty_list)
-                return Error.BadSyntax;
-            return m.run(args.pair.cdr.pair.car, m.global, args.pair.car.symbol);
+            const parts = try expand.defineParts(m.arena, d.pair.cdr);
+            return m.run(parts.expr, m.global, parts.name);
         }
         return m.run(d, m.global, null);
     }
@@ -994,6 +991,12 @@ test "differential: machine and oracle agree on a form corpus" {
         "'(1 . 2)",
         "(car '(1 . 2)) (cdr '(1 . 2))",
         "(equal? (cons 1 2) '(1 . 2))",
+        // define shorthand (8F'.3)
+        "(define (twice x) (* 2 x)) (twice 21)",
+        "(define (five) 5) (five)",
+        "(define (f x) 1 (* x x)) (f 4)",
+        "(define (7) 1)",
+        "(define ((f)) 1)",
         // cond/and/or (7.3): short-circuit means untaken positions may be unbound
         "(cond (#f 1) ((eq? 1 1) 'hit) (else 'miss))",
         "(cond (#f 1))",

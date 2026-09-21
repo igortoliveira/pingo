@@ -259,6 +259,32 @@ pub fn expandOr(arena: std.mem.Allocator, form: Datum) Error!Datum {
     return try listOf(arena, &.{ lambda_form, form.pair.car });
 }
 
+/// Splits a define form (the datum after the `define` symbol) into name and
+/// expression, rewriting the `(define (f . formals) body ...)` shorthand into
+/// `(define f (lambda formals body ...))` (§2). Shared by both engines.
+pub const DefineParts = struct { name: []const u8, expr: Datum };
+
+pub fn defineParts(arena: std.mem.Allocator, form: Datum) Error!DefineParts {
+    if (form != .pair) return error.BadSyntax;
+    switch (form.pair.car) {
+        .symbol => |name| {
+            if (form.pair.cdr != .pair or form.pair.cdr.pair.cdr != .empty_list)
+                return error.BadSyntax;
+            return .{ .name = name, .expr = form.pair.cdr.pair.car };
+        },
+        .pair => |head| {
+            if (head.car != .symbol) return error.BadSyntax;
+            const lambda_form = try datum_mod.cons(
+                arena,
+                try datum_mod.symbol(arena, "lambda"),
+                try datum_mod.cons(arena, head.cdr, form.pair.cdr),
+            );
+            return .{ .name = head.car.symbol, .expr = lambda_form };
+        },
+        else => return error.BadSyntax,
+    }
+}
+
 /// Parsed `((n e) ...)` binding list; names are distinct symbols. Shared by
 /// both engines' native `letrec` (§2 "Derived forms II").
 pub const Bindings = struct {
