@@ -4,7 +4,6 @@
 const std = @import("std");
 const value_mod = @import("value.zig");
 const env_mod = @import("env.zig");
-const regex_mod = @import("regex.zig");
 
 const Value = value_mod.Value;
 const PrimitiveError = value_mod.PrimitiveError;
@@ -140,41 +139,8 @@ const table = [_]Value.Primitive{
     .{ .name = "vector-ref", .func = vectorRef },
     .{ .name = "vector->list", .func = vectorToList },
     .{ .name = "list->vector", .func = listToVector },
-    // regex: SRFI-115 SRE (tier 15A). Patterns are pure data.
-    .{ .name = "regexp-search", .func = regexpSearch },
-    .{ .name = "regexp-matches?", .func = regexpMatches },
 };
 
-fn regexError(e: regex_mod.Error) PrimitiveError {
-    return switch (e) {
-        error.BadPattern => error.TypeError,
-        error.LimitExceeded => error.LimitExceeded,
-        error.OutOfMemory => error.OutOfMemory,
-    };
-}
-
-fn regexpSearch(arena: std.mem.Allocator, args: []const Value) PrimitiveError!Value {
-    try exactly(args, 2);
-    const s = try asString(args[1]);
-    const found = regex_mod.search(arena, args[0], s) catch |e| return regexError(e);
-    const match = found orelse return .{ .boolean = false };
-    const vec = try arena.alloc(Value, match.subs.len + 1);
-    vec[0] = .{ .string = try arena.dupe(u8, s[match.whole.start..match.whole.end]) };
-    for (match.subs, 0..) |sp, i| {
-        vec[i + 1] = if (sp) |span|
-            .{ .string = try arena.dupe(u8, s[span.start..span.end]) }
-        else
-            .{ .boolean = false };
-    }
-    return .{ .vector = vec };
-}
-
-fn regexpMatches(arena: std.mem.Allocator, args: []const Value) PrimitiveError!Value {
-    try exactly(args, 2);
-    const s = try asString(args[1]);
-    const ok = regex_mod.matchesWhole(arena, args[0], s) catch |e| return regexError(e);
-    return .{ .boolean = ok };
-}
 
 fn asVector(v: Value) PrimitiveError![]Value {
     return if (v == .vector) v.vector else error.TypeError;

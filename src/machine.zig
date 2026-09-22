@@ -23,7 +23,7 @@ pub const Diagnostic = eval_mod.Diagnostic;
 
 pub const Pending = Value.Pending;
 
-const prelude_src = @embedFile("prelude.scm");
+const prelude_sources = [_][]const u8{ @embedFile("prelude.scm"), @embedFile("regex.scm") };
 
 pub const Outcome = union(enum) {
     value: Value,
@@ -162,13 +162,17 @@ pub const Machine = struct {
             m.limits = saved;
             m.fuel_used = 0;
         }
-        var r = reader_mod.Reader.init(m.arena, prelude_src, 64);
-        while (r.read() catch unreachable) |d| {
-            const outcome = m.evalToplevel(d) catch |err| switch (err) {
-                Error.OutOfMemory => return error.OutOfMemory,
-                else => unreachable,
-            };
-            std.debug.assert(outcome == .value); // the prelude has no capabilities
+        // The host bundles several source files into the environment at init
+        // (not a library system — no import/paths/authority; §7).
+        for (prelude_sources) |src| {
+            var r = reader_mod.Reader.init(m.arena, src, 64);
+            while (r.read() catch unreachable) |d| {
+                const outcome = m.evalToplevel(d) catch |err| switch (err) {
+                    Error.OutOfMemory => return error.OutOfMemory,
+                    else => unreachable,
+                };
+                std.debug.assert(outcome == .value); // the prelude has no capabilities
+            }
         }
     }
 
@@ -1848,6 +1852,9 @@ test "differential: machine and oracle agree on a form corpus" {
         "(regexp-search '(seq (submatch (+ alpha)) #\\= (submatch (+ num))) \"key=42\")",
         "(regexp-search '(+ num) \"abc\")",
         "(regexp-matches? '(seq (? #\\-) (+ num)) \"-42\")",
+        "(regexp-matches? '(+ (/ #\\a #\\z)) \"hello\")",
+        "(regexp-replace '(+ num) \"id=42 x\" \"N\")",
+        "(regexp-search '(+ (~ #\\space)) \"  word  \")",
         // quasiquote (8G.2)
         "`(1 ,(+ 1 1) 3)",
         "(define qx 5) `(qx ,qx)",

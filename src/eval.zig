@@ -104,12 +104,17 @@ pub const Evaluator = struct {
             e.limits = saved;
             e.fuel_used = 0;
         }
-        var r = reader_mod.Reader.init(e.arena, @embedFile("prelude.scm"), 64);
-        while (r.read() catch unreachable) |d| {
-            _ = e.evalToplevel(d) catch |err| switch (err) {
-                Error.OutOfMemory => return error.OutOfMemory,
-                else => unreachable,
-            };
+        // The host bundles several source files into the environment at init
+        // (not a library system — no import/paths/authority; §7).
+        const sources = [_][]const u8{ @embedFile("prelude.scm"), @embedFile("regex.scm") };
+        for (sources) |src| {
+            var r = reader_mod.Reader.init(e.arena, src, 64);
+            while (r.read() catch unreachable) |d| {
+                _ = e.evalToplevel(d) catch |err| switch (err) {
+                    Error.OutOfMemory => return error.OutOfMemory,
+                    else => unreachable,
+                };
+            }
         }
     }
 

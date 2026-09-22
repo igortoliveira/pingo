@@ -18,7 +18,6 @@ pub const machine = @import("machine.zig");
 pub const expand = @import("expand.zig");
 pub const trace = @import("trace.zig");
 pub const macro = @import("macro.zig");
-pub const regex = @import("regex.zig");
 
 test {
     std.testing.refAllDecls(@This());
