@@ -1870,6 +1870,10 @@ test "differential: machine and oracle agree on a form corpus" {
         "(list (for-all odd? '(1 3 5)) (exists even? '(1 3 4)))",
         // define-record-type (15C): immutable tagged-vector records
         "(define-record-type pt (mk x y) pt? (x px) (y py)) (define p (mk 3 4)) (list (pt? p) (pt? 5) (px p) (py p))",
+        // sugar (15E): when/unless/let-values/case-lambda
+        "(list (when (> 3 2) 'a 'b) (unless (> 3 2) 'no))",
+        "(let-values (((a b) (values 1 2)) ((c) (values 3))) (list a b c))",
+        "(define g (case-lambda (() 'z) ((x) x) ((x y) (list x y)) (r (cons 'm r)))) (list (g) (g 1) (g 1 2) (g 1 2 3))",
         // quasiquote (8G.2)
         "`(1 ,(+ 1 1) 3)",
         "(define qx 5) `(qx ,qx)",

@@ -185,3 +185,43 @@
       #f
       (let ((r (apply pred (%cars lists))))
         (if r r (apply exists pred (%cdrs lists))))))
+
+;; cheap sugar (R7RS-small, tier 15E) — pure derived forms.
+(define-syntax when
+  (syntax-rules () ((_ test body ...) (if test (begin body ...) (if #f #f)))))
+(define-syntax unless
+  (syntax-rules () ((_ test body ...) (if test (if #f #f) (begin body ...)))))
+
+;; let-values / let*-values via call-with-values (nested = sequential; this is
+;; exactly let*-values, and let-values too for the common case where the exprs
+;; don't reference the freshly-bound formals).
+(define-syntax let*-values
+  (syntax-rules ()
+    ((_ () body ...) (let () body ...)) ; a body (internal defines) — not a begin
+    ((_ ((formals expr) rest ...) body ...)
+     (call-with-values (lambda () expr)
+       (lambda formals (let*-values (rest ...) body ...))))))
+(define-syntax let-values
+  (syntax-rules ()
+    ((_ () body ...) (let () body ...))
+    ((_ ((formals expr) rest ...) body ...)
+     (call-with-values (lambda () expr)
+       (lambda formals (let-values (rest ...) body ...))))))
+
+;; case-lambda: dispatch on argument count at call time.
+(define (%arity-ok? formals n)
+  (cond ((symbol? formals) #t)
+        ((null? formals) (= n 0))
+        ((pair? formals) (and (>= n 1) (%arity-ok? (cdr formals) (- n 1))))
+        (else #f)))
+(define (%case-lambda args clauses)
+  (if (null? clauses)
+      (car '()) ; no clause matches this arity — signal an error
+      (if (%arity-ok? (caar clauses) (length args))
+          (apply (cdar clauses) args)
+          (%case-lambda args (cdr clauses)))))
+(define-syntax case-lambda
+  (syntax-rules ()
+    ((_ (formals body ...) ...)
+     (lambda args
+       (%case-lambda args (list (cons (quote formals) (lambda formals body ...)) ...))))))
