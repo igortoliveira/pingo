@@ -1842,6 +1842,12 @@ test "differential: machine and oracle agree on a form corpus" {
         "(vector-ref #(a) 5)",
         "(vector->list #(1 2 3))",
         "(list->vector '(1 2))",
+        // regex SRE (15A)
+        "(regexp-search '(+ (or #\\a #\\b)) \"xxabbaxx\")",
+        "(list (regexp-matches? '(+ num) \"12345\") (regexp-matches? '(+ num) \"12a\"))",
+        "(regexp-search '(seq (submatch (+ alpha)) #\\= (submatch (+ num))) \"key=42\")",
+        "(regexp-search '(+ num) \"abc\")",
+        "(regexp-matches? '(seq (? #\\-) (+ num)) \"-42\")",
         // quasiquote (8G.2)
         "`(1 ,(+ 1 1) 3)",
         "(define qx 5) `(qx ,qx)",

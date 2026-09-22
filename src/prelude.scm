@@ -154,3 +154,7 @@
 ;; withdrawn here and reintroduced natively in the next commit.
 
 (define call-with-current-continuation call/cc)
+
+;; regex (SRFI-115 subset, tier 15A): a match object is a vector, index 0 the
+;; whole match, 1..n the submatches. Design in docs/regex.md.
+(define (regexp-match-submatch m i) (vector-ref m i))
