@@ -1855,6 +1855,14 @@ test "differential: machine and oracle agree on a form corpus" {
         "(regexp-matches? '(+ (/ #\\a #\\z)) \"hello\")",
         "(regexp-replace '(+ num) \"id=42 x\" \"N\")",
         "(regexp-search '(+ (~ #\\space)) \"  word  \")",
+        // list HOFs (15B): filter/remove/fold/find/for-all/exists
+        "(filter odd? '(1 2 3 4 5))",
+        "(remove odd? '(1 2 3 4 5))",
+        "(fold-left + 0 '(1 2 3 4))",
+        "(fold-right cons '() '(1 2 3))",
+        "(fold-left + 0 '(1 2 3) '(10 20 30))",
+        "(list (find even? '(1 3 4 5)) (find even? '(1 3 5)))",
+        "(list (for-all odd? '(1 3 5)) (exists even? '(1 3 4)))",
         // quasiquote (8G.2)
         "`(1 ,(+ 1 1) 3)",
         "(define qx 5) `(qx ,qx)",

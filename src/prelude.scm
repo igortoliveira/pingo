@@ -154,3 +154,34 @@
 ;; withdrawn here and reintroduced natively in the next commit.
 
 (define call-with-current-continuation call/cc)
+
+;; list higher-order functions (R6RS (rnrs lists) / SRFI-1) — pure; not R5RS.
+(define (filter pred xs)
+  (cond ((null? xs) '())
+        ((pred (car xs)) (cons (car xs) (filter pred (cdr xs))))
+        (else (filter pred (cdr xs)))))
+(define (remove pred xs) (filter (lambda (x) (not (pred x))) xs))
+(define (partition pred xs) (values (filter pred xs) (remove pred xs)))
+(define (find pred xs)
+  (cond ((null? xs) #f)
+        ((pred (car xs)) (car xs))
+        (else (find pred (cdr xs)))))
+(define (fold-left proc acc . lists)
+  (if (%any-null? lists)
+      acc
+      (apply fold-left proc (apply proc acc (%cars lists)) (%cdrs lists))))
+(define (fold-right proc acc . lists)
+  (if (%any-null? lists)
+      acc
+      (apply proc (append (%cars lists)
+                          (list (apply fold-right proc acc (%cdrs lists)))))))
+(define (for-all pred . lists)
+  (if (%any-null? lists)
+      #t
+      (let ((r (apply pred (%cars lists))))
+        (and r (if (%any-null? (%cdrs lists)) r (apply for-all pred (%cdrs lists)))))))
+(define (exists pred . lists)
+  (if (%any-null? lists)
+      #f
+      (let ((r (apply pred (%cars lists))))
+        (if r r (apply exists pred (%cdrs lists))))))
