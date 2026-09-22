@@ -2,7 +2,7 @@
 ; fuel-bounded like any guest code (no ad-hoc step cap). Loaded at session init
 ; alongside the prelude; not a library — always available. Design: docs/regex.md.
 ;
-; SRE subset: char / string / any / bos / eos, seq / or / * / + / ?, submatch
+; SRE subset: char / string / any / bos / eos, seq (or :) / or / * / + / ?, submatch
 ; (and $), char ranges (/ ...), complement (~ ...), named classes
 ; (alpha num alnum space). A match object is a vector: index 0 the whole match,
 ; 1..n the submatches (or #f).
@@ -44,7 +44,7 @@
 (define (%re-compound re s pos len subs k)
   (let ((op (car re)) (args (cdr re)))
     (cond
-      ((eq? op 'seq) (%re-seq args s pos len subs k))
+      ((or (eq? op 'seq) (eq? op ':)) (%re-seq args s pos len subs k))
       ((eq? op 'or) (%re-or args s pos len subs k))
       ((eq? op '?) (or (%re-seq args s pos len subs k) (k pos subs)))
       ((eq? op '*) (%re-star args s pos len subs k))

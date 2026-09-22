@@ -1968,6 +1968,7 @@ test "differential: machine and oracle agree on a form corpus" {
         "(regexp-search '(seq (submatch (+ alpha)) #\\= (submatch (+ num))) \"key=42\")",
         "(regexp-search '(+ num) \"abc\")",
         "(regexp-matches? '(seq (? #\\-) (+ num)) \"-42\")",
+        "(regexp-matches? '(: \"id-\" (+ num)) \"id-42\")", // ':' is a seq alias (SRFI-115)
         "(regexp-matches? '(+ (/ #\\a #\\z)) \"hello\")",
         "(regexp-replace '(+ num) \"id=42 x\" \"N\")",
         "(regexp-search '(+ (~ #\\space)) \"  word  \")",
