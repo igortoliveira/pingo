@@ -345,6 +345,71 @@ pub fn expandOr(arena: std.mem.Allocator, form: Datum) Error!Datum {
     return try listOf(arena, &.{ lambda_form, form.pair.car });
 }
 
+/// `define-record-type` (R7RS-small, tier 15C): expands to the `define`s of a
+/// constructor, predicate, and accessors over an immutable tagged vector. The
+/// type tag is a fresh cons bound to `%rt:<name>`, so the predicate's `eq?`
+/// check is unforgeable (re-consing an equal marker is not `eq?`). Pure: field
+/// **mutators**, if declared, are ignored (no mutation in Pingo). `rest` is the
+/// datum after the `define-record-type` symbol; returns the generated defines.
+pub fn recordType(arena: std.mem.Allocator, rest: Datum) Error![]Datum {
+    // rest = (name (ctor cfield...) pred (field accessor [mutator])...)
+    if (rest != .pair or rest.pair.car != .symbol) return error.BadSyntax;
+    const name = rest.pair.car.symbol;
+    var r2 = rest.pair.cdr;
+    if (r2 != .pair or r2.pair.car != .pair) return error.BadSyntax;
+    const ctor_spec = r2.pair.car; // (ctor cfield...)
+    if (ctor_spec.pair.car != .symbol) return error.BadSyntax;
+    const ctor = ctor_spec.pair.car.symbol;
+    var cfields: std.ArrayList([]const u8) = .empty;
+    var cf = ctor_spec.pair.cdr;
+    while (cf == .pair) : (cf = cf.pair.cdr) {
+        if (cf.pair.car != .symbol) return error.BadSyntax;
+        try cfields.append(arena, cf.pair.car.symbol);
+    }
+    r2 = r2.pair.cdr;
+    if (r2 != .pair or r2.pair.car != .symbol) return error.BadSyntax;
+    const pred = r2.pair.car.symbol;
+    // field specs: (field accessor [mutator]) ...
+    var fields: std.ArrayList([]const u8) = .empty;
+    var accessors: std.ArrayList([]const u8) = .empty;
+    var fs = r2.pair.cdr;
+    while (fs == .pair) : (fs = fs.pair.cdr) {
+        const spec = fs.pair.car;
+        if (spec != .pair or spec.pair.car != .symbol) return error.BadSyntax;
+        if (spec.pair.cdr != .pair or spec.pair.cdr.pair.car != .symbol) return error.BadSyntax;
+        try fields.append(arena, spec.pair.car.symbol);
+        try accessors.append(arena, spec.pair.cdr.pair.car.symbol);
+        // a third element (mutator) is deliberately ignored — Pingo is pure.
+    }
+    if (fs != .empty_list) return error.BadSyntax;
+
+    // Generate the defines as source and read them back (simpler than building
+    // the datums by hand; the reader is the single source of truth for shape).
+    var buf = std.Io.Writer.Allocating.init(arena);
+    defer buf.deinit();
+    const w = &buf.writer;
+    w.print("(define %rt:{s} (cons (quote record-type) (quote {s})))\n", .{ name, name }) catch return error.OutOfMemory;
+    w.print("(define ({s}", .{ctor}) catch return error.OutOfMemory;
+    for (cfields.items) |c| w.print(" {s}", .{c}) catch return error.OutOfMemory;
+    w.print(") (vector %rt:{s}", .{name}) catch return error.OutOfMemory;
+    for (fields.items) |f| {
+        var in_ctor = false;
+        for (cfields.items) |c| {
+            if (std.mem.eql(u8, c, f)) in_ctor = true;
+        }
+        if (in_ctor) w.print(" {s}", .{f}) catch return error.OutOfMemory else w.writeAll(" (if #f #f)") catch return error.OutOfMemory;
+    }
+    w.writeAll("))\n") catch return error.OutOfMemory;
+    w.print("(define ({s} o) (and (vector? o) (= (vector-length o) {d}) (eq? (vector-ref o 0) %rt:{s})))\n", .{ pred, fields.items.len + 1, name }) catch return error.OutOfMemory;
+    for (accessors.items, 0..) |acc, i|
+        w.print("(define ({s} o) (vector-ref o {d}))\n", .{ acc, i + 1 }) catch return error.OutOfMemory;
+
+    var out: std.ArrayList(Datum) = .empty;
+    var rd = reader_mod.Reader.init(arena, buf.written(), 64);
+    while (rd.read() catch return error.BadSyntax) |d| try out.append(arena, d);
+    return out.toOwnedSlice(arena);
+}
+
 /// Splits a define form (the datum after the `define` symbol) into name and
 /// expression, rewriting the `(define (f . formals) body ...)` shorthand into
 /// `(define f (lambda formals body ...))` (§2). Shared by both engines.

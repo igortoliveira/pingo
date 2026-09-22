@@ -202,6 +202,10 @@ pub const Machine = struct {
             try macro_mod.defineSyntax(m.arena, d.pair.cdr, m.global);
             return .{ .value = .unspecified };
         }
+        if (d == .pair and isForm(d.pair, "define-record-type")) {
+            for (try expand.recordType(m.arena, d.pair.cdr)) |def| _ = try m.evalToplevel(def);
+            return .{ .value = .unspecified };
+        }
         if (d == .pair and isForm(d.pair, "define")) {
             const parts = try expand.defineParts(m.arena, d.pair.cdr);
             return m.run(parts.expr, m.global, parts.name);
@@ -456,6 +460,7 @@ pub const Machine = struct {
                 if (isForm(p, "or"))
                     return .{ .expr = .{ .d = try expand.expandOr(m.arena, p.cdr), .env = x.env } };
                 if (isForm(p, "define-syntax")) return Error.BadSyntax; // top/body only (§2)
+                if (isForm(p, "define-record-type")) return Error.BadSyntax; // top level only (15C)
                 if (isForm(p, "let-syntax") or isForm(p, "letrec-syntax")) {
                     const recursive = std.mem.eql(u8, p.car.symbol, "letrec-syntax");
                     const child = try Env.init(m.arena, x.env);
@@ -1863,6 +1868,8 @@ test "differential: machine and oracle agree on a form corpus" {
         "(fold-left + 0 '(1 2 3) '(10 20 30))",
         "(list (find even? '(1 3 4 5)) (find even? '(1 3 5)))",
         "(list (for-all odd? '(1 3 5)) (exists even? '(1 3 4)))",
+        // define-record-type (15C): immutable tagged-vector records
+        "(define-record-type pt (mk x y) pt? (x px) (y py)) (define p (mk 3 4)) (list (pt? p) (pt? 5) (px p) (py p))",
         // quasiquote (8G.2)
         "`(1 ,(+ 1 1) 3)",
         "(define qx 5) `(qx ,qx)",

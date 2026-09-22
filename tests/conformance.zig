@@ -16,7 +16,7 @@ const r7rs_suite = @embedFile("vendor/chibi-scheme/r7rs-tests.scm");
 
 const Counts = struct { pass: usize = 0, fail: usize = 0, skip: usize = 0 };
 
-const special_forms = [_][]const u8{ "quote", "if", "define", "lambda", "begin", "let", "let*", "letrec", "do", "case", "cond", "and", "or", "else", "delay", "define-syntax", "let-syntax", "letrec-syntax" };
+const special_forms = [_][]const u8{ "quote", "if", "define", "lambda", "begin", "let", "let*", "letrec", "do", "case", "cond", "and", "or", "else", "delay", "define-syntax", "let-syntax", "letrec-syntax", "define-record-type" };
 
 pub fn main(init: std.process.Init) !void {
     var stdout_buffer: [4096]u8 = undefined;
@@ -43,7 +43,7 @@ pub fn main(init: std.process.Init) !void {
     // mutation — deliberate). r7rs grows as tier-15 features land; the floor
     // guards against silently losing coverage.
     const r5_floor = 174;
-    const r7_floor = 378;
+    const r7_floor = 382; // +4: define-record-type (15C)
     if (r5.pass < r5_floor or r7.pass < r7_floor) {
         std.debug.print("conformance fell below floor (r5rs {d}/{d}, r7rs {d}/{d})\n", .{ r5.pass, r5_floor, r7.pass, r7_floor });
         std.process.exit(1);
@@ -191,6 +191,9 @@ fn check(
         },
         .pair => |p| {
             if (p.car == .symbol and std.mem.eql(u8, p.car.symbol, "quote")) return true;
+            // define-record-type: the name/field specs are syntax, not
+            // expressions — the form is a supported definition (15C).
+            if (p.car == .symbol and std.mem.eql(u8, p.car.symbol, "define-record-type")) return true;
             if (p.car == .symbol and std.mem.eql(u8, p.car.symbol, "quasiquote") and
                 p.cdr == .pair and p.cdr.pair.cdr == .empty_list)
                 return checkTemplate(arena, p.cdr.pair.car, 1, evaluator, bound);

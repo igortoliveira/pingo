@@ -133,6 +133,10 @@ pub const Evaluator = struct {
             try macro_mod.defineSyntax(e.arena, d.pair.cdr, e.global);
             return .unspecified;
         }
+        if (d == .pair and isForm(d.pair, "define-record-type")) {
+            for (try expand.recordType(e.arena, d.pair.cdr)) |def| _ = try e.evalToplevel(def);
+            return .unspecified;
+        }
         if (d == .pair and isForm(d.pair, "define")) {
             const parts = try expand.defineParts(e.arena, d.pair.cdr);
             const v = try e.eval(parts.expr, e.global);
@@ -291,6 +295,7 @@ pub const Evaluator = struct {
                         continue;
                     }
                     if (isForm(p, "define-syntax")) return Error.BadSyntax; // top/body only (§2)
+                    if (isForm(p, "define-record-type")) return Error.BadSyntax; // top level only (15C)
                     if (isForm(p, "let-syntax") or isForm(p, "letrec-syntax")) {
                         const recursive = std.mem.eql(u8, p.car.symbol, "letrec-syntax");
                         const child = try Env.init(e.arena, scope);
