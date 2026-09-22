@@ -8,5 +8,14 @@ Fetched: 2026-09-20
 License: BSD 3-Clause, Copyright (c) 2009-2021 Alex Shinn
          (see LICENSE in this directory, copied from the repository's COPYING)
 
+File:    r7rs-tests.scm
+Origin:  https://github.com/ashinn/chibi-scheme/blob/master/tests/r7rs-tests.scm
+Commit:  a2e383f685d23992a6a307fc61544b07e5843cbe (same commit as above)
+Fetched: 2026-09-22
+License: BSD 3-Clause, Copyright (c) 2009-2021 Alex Shinn
+         Second conformance oracle: as Pingo gains R7RS features (records,
+         exceptions, case-lambda, let-values, …) the harness's automatic
+         allowlist turns more of its tests from skip into pass.
+
 The vendored file is never modified. Any adaptation needed by Pingo's
 conformance harness lives in the harness, not here.

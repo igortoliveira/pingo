@@ -11,7 +11,10 @@ const pingo = @import("pingo");
 const Datum = pingo.datum.Datum;
 const Value = pingo.value.Value;
 
-const suite = @embedFile("vendor/chibi-scheme/r5rs-tests.scm");
+const r5rs_suite = @embedFile("vendor/chibi-scheme/r5rs-tests.scm");
+const r7rs_suite = @embedFile("vendor/chibi-scheme/r7rs-tests.scm");
+
+const Counts = struct { pass: usize = 0, fail: usize = 0, skip: usize = 0 };
 
 const special_forms = [_][]const u8{ "quote", "if", "define", "lambda", "begin", "let", "let*", "letrec", "do", "case", "cond", "and", "or", "else", "delay", "define-syntax", "let-syntax", "letrec-syntax" };
 
@@ -23,57 +26,77 @@ pub fn main(init: std.process.Init) !void {
     var arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
-    var evaluator = try pingo.machine.Machine.init(arena, .{
-        .fuel = 100_000_000,
-        .call_depth = 1_000,
-    });
 
-    var pass: usize = 0;
-    var fail: usize = 0;
-    var skip: usize = 0;
+    // r5rs is the strict baseline: 0 fail, we match R5RS-minus-mutation.
+    const r5 = try runSuite(out, arena, r5rs_suite, "r5rs", true);
+    // r7rs is a forward coverage oracle: it tests the larger standard we do
+    // not fully implement, so its FAILs are known gaps (unimplemented R7RS
+    // behavior), tolerated — the pass count grows as tier-15 features land.
+    const r7 = try runSuite(out, arena, r7rs_suite, "r7rs", false);
 
-    var forms = FormIterator{ .lexer = pingo.lexer.Lexer.init(suite) };
+    try out.print("conformance r5rs: {d} pass, {d} fail, {d} skip (strict)\n", .{ r5.pass, r5.fail, r5.skip });
+    try out.print("conformance r7rs: {d} pass, {d} fail, {d} skip (coverage — fails = R7RS gaps)\n", .{ r7.pass, r7.fail, r7.skip });
+    try out.flush();
+    if (r5.fail > 0) std.process.exit(1); // only the strict baseline breaks the build
+
+    // Regression floors: r5rs dropped 183→173 with purity (tier 14 removed
+    // mutation — deliberate). r7rs grows as tier-15 features land; the floor
+    // guards against silently losing coverage.
+    const r5_floor = 174;
+    const r7_floor = 378;
+    if (r5.pass < r5_floor or r7.pass < r7_floor) {
+        std.debug.print("conformance fell below floor (r5rs {d}/{d}, r7rs {d}/{d})\n", .{ r5.pass, r5_floor, r7.pass, r7_floor });
+        std.process.exit(1);
+    }
+}
+
+/// Runs one vendored suite against a fresh evaluator. Non-`test` top-level
+/// forms whose symbols all resolve are evaluated as setup (so a suite's own
+/// `define`s/`define-record-type`s are in scope for the tests that follow);
+/// unsupported ones are skipped. Only `(test ...)` forms count as pass/fail.
+fn runSuite(out: *std.Io.Writer, arena: std.mem.Allocator, src: []const u8, label: []const u8, strict: bool) !Counts {
+    var ev = try pingo.machine.Machine.init(arena, .{ .fuel = 100_000_000, .call_depth = 1_000 });
+    var c = Counts{};
+    var forms = FormIterator{ .lexer = pingo.lexer.Lexer.init(src) };
     while (forms.next()) |form_src| {
         const t = parseTestForm(arena, form_src) orelse {
-            skip += 1;
+            // setup form: evaluate it if supported, so later tests see its defines
+            if (parseOne(arena, form_src)) |d|
+                if (allSymbolsSupported(arena, d, &ev)) {
+                    _ = ev.runToCompletion(d) catch {};
+                };
+            c.skip += 1;
             continue;
         };
-        if (!allSymbolsSupported(arena, t.expected, &evaluator) or
-            !allSymbolsSupported(arena, t.expr, &evaluator))
+        if (!allSymbolsSupported(arena, t.expected, &ev) or
+            !allSymbolsSupported(arena, t.expr, &ev))
         {
-            skip += 1;
+            c.skip += 1;
             continue;
         }
-
-        const expected = evaluator.runToCompletion(t.expected) catch {
-            skip += 1; // the *expectation* itself needs unsupported semantics
+        const expected = ev.runToCompletion(t.expected) catch {
+            c.skip += 1;
             continue;
         };
-        const actual = evaluator.runToCompletion(t.expr) catch |err| {
-            fail += 1;
-            try out.print("FAIL (error {s}): {s}\n", .{ pingo.eval.kindOf(err), form_src });
+        const actual = ev.runToCompletion(t.expr) catch |err| {
+            c.fail += 1;
+            if (strict) try out.print("FAIL [{s}] (error {s}): {s}\n", .{ label, pingo.eval.kindOf(err), form_src });
             continue;
         };
         if (deepEqual(expected, actual)) {
-            pass += 1;
+            c.pass += 1;
         } else {
-            fail += 1;
-            try out.print("FAIL (mismatch): {s}\n", .{form_src});
+            c.fail += 1;
+            if (strict) try out.print("FAIL [{s}] (mismatch): {s}\n", .{ label, form_src });
         }
     }
+    return c;
+}
 
-    try out.print("conformance: {d} pass, {d} fail, {d} skip\n", .{ pass, fail, skip });
-    try out.flush();
-    if (fail > 0) std.process.exit(1);
-    // Regression floor: raise this whenever new features convert skips to
-    // passes; a drop means a feature silently stopped being recognized.
-    // Purity (tier 14): Pingo dropped mutation, so R5RS assignment tests no
-    // longer pass — a deliberate divergence, not a regression (docs/purity.md).
-    const pass_floor = 173;
-    if (pass < pass_floor) {
-        std.debug.print("conformance: pass count {d} fell below the floor {d}\n", .{ pass, pass_floor });
-        std.process.exit(1);
-    }
+/// Parses a single datum from `src`, or null if unreadable in v0.
+fn parseOne(arena: std.mem.Allocator, src: []const u8) ?Datum {
+    var r = pingo.reader.Reader.init(arena, src, 64);
+    return (r.read() catch return null);
 }
 
 /// Iterates over top-level parenthesized forms via the lexer (so strings and
