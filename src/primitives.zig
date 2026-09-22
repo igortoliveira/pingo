@@ -14,6 +14,9 @@ pub fn install(scope: *env_mod.Env) std.mem.Allocator.Error!void {
     try scope.define(apply_primitive.name, .{ .primitive = &apply_primitive });
     try scope.define(callcc_primitive.name, .{ .primitive = &callcc_primitive });
     try scope.define(dynamic_wind_primitive.name, .{ .primitive = &dynamic_wind_primitive });
+    try scope.define(raise_primitive.name, .{ .primitive = &raise_primitive });
+    try scope.define(raise_continuable_primitive.name, .{ .primitive = &raise_continuable_primitive });
+    try scope.define(with_exception_handler_primitive.name, .{ .primitive = &with_exception_handler_primitive });
 }
 
 /// `call/cc` is engine-level like `apply`: a primitive cannot capture the
@@ -40,6 +43,18 @@ pub const dynamic_wind_primitive = Value.Primitive{
 };
 
 fn dynamicWindStub(_: std.mem.Allocator, _: []const Value) PrimitiveError!Value {
+    return error.TypeError;
+}
+
+/// Exception control (tier 15D): engine-level like call/cc — the machine
+/// intercepts these sentinels to manage its handler stack. The oracle has no
+/// handler stack (control feature, machine-only, docs/exceptions.md); its stubs
+/// error.
+pub const raise_primitive = Value.Primitive{ .name = "raise", .func = exnStub, .strict_args = false };
+pub const raise_continuable_primitive = Value.Primitive{ .name = "raise-continuable", .func = exnStub, .strict_args = false };
+pub const with_exception_handler_primitive = Value.Primitive{ .name = "with-exception-handler", .func = exnStub, .strict_args = false };
+
+fn exnStub(_: std.mem.Allocator, _: []const Value) PrimitiveError!Value {
     return error.TypeError;
 }
 

@@ -81,6 +81,15 @@ const Frame = union(enum) {
     dw_thunk: struct { entry: *WindEntry, after: Value },
     /// dynamic-wind: `after` has run; return the thunk's saved `result`.
     dw_after: struct { result: Value },
+    /// with-exception-handler: the thunk returned — pop the installed handler
+    /// and yield its value (tier 15D).
+    pop_handler,
+    /// A non-continuable handler (from `raise` or a runtime error) returned —
+    /// that is itself an error (§15D).
+    raise_return,
+    /// `raise-continuable`: the handler returned `v` — reinstall `handler` and
+    /// continue with `v` at the raise-continuable call site.
+    restore_handler: struct { handler: Value },
     /// Continuation invoke: run the pending winder `thunks` in order, then
     /// install `target`'s frames/wind and deliver `value` (docs/callcc.md).
     winders: struct { thunks: []Value, index: usize, target: *const Snapshot, value: Value },
@@ -93,7 +102,7 @@ const WindEntry = struct { before: Value, after: Value };
 
 /// A captured continuation (tier 8H″): a clone of the frame stack at the
 /// `call/cc` call site. `Value.continuation` points here (opaquely).
-const Snapshot = struct { frames: []Frame, wind: []*WindEntry };
+const Snapshot = struct { frames: []Frame, wind: []*WindEntry, handlers: []Value };
 
 /// Deep-copies the frame stack for a continuation snapshot. Frames hold
 /// immutable data (`Datum`, `Env`, slices, `Bindings`) which is shared;
@@ -143,6 +152,11 @@ pub const Machine = struct {
     wind: std.ArrayList(*WindEntry) = .empty,
     /// Session-monotonic mark counter for macro hygiene renames (tier 8I.4).
     macro_counter: u64 = 0,
+    /// Dynamic exception-handler stack (tier 15D); the current handler is the
+    /// last. Captured in a continuation snapshot so it unwinds with call/cc.
+    handlers: std.ArrayList(Value) = .empty,
+    /// The object of an uncaught raise (set when returning Error.Raised).
+    raised: ?Value = null,
 
     pub fn init(arena: std.mem.Allocator, limits: Limits) std.mem.Allocator.Error!Machine {
         const global = try Env.init(arena, null);
@@ -195,8 +209,10 @@ pub const Machine = struct {
         m.feed_calls.clearRetainingCapacity();
         m.parked_calls.clearRetainingCapacity();
         // dynamic-wind extents do not cross toplevel forms; a prior feed that
-        // aborted mid-extent may have left the wind stack dirty (§2).
+        // aborted mid-extent may have left the wind/handler stacks dirty.
         m.wind.clearRetainingCapacity();
+        m.handlers.clearRetainingCapacity();
+        m.raised = null;
         m.diagnostic = null;
         if (d == .pair and isForm(d.pair, "define-syntax")) {
             try macro_mod.defineSyntax(m.arena, d.pair.cdr, m.global);
@@ -322,7 +338,7 @@ pub const Machine = struct {
         while (true) {
             try m.chargeFuel();
             switch (m.control) {
-                .expr => |x| m.control = try m.stepExpr(x),
+                .expr => |x| m.control = m.stepExpr(x) catch |e| try m.raiseError(e),
                 .value => |v| {
                     if (m.frames.items.len == 0) {
                         // §4 toplevel sync: the feed only completes when
@@ -332,7 +348,7 @@ pub const Machine = struct {
                         std.debug.assert(m.parked_calls.items.len == 0);
                         // ...and none failed, even if never forced
                         // (stop-on-error, §6).
-                        for (m.feed_calls.items) |p| if (p.state == .failed) {
+                        for (m.feed_calls.items) |p| if (p.state == .failed and !p.handled) {
                             m.diagnostic = .{ .context = p.capability.name };
                             return Error.HostError;
                         };
@@ -343,13 +359,18 @@ pub const Machine = struct {
                             .blocked => unreachable, // outstanding is empty
                         }
                     }
-                    m.control = try m.stepFrame(v);
+                    m.control = m.stepFrame(v) catch |e| try m.raiseError(e);
                 },
                 .awaiting => |p| switch (p.state) {
                     .resolved => |v| m.control = .{ .value = v },
                     .failed => {
+                        // A failed capability forced inside a handler's extent
+                        // is catchable (§15D); uncaught, it aborts the feed. If
+                        // a handler will catch it, mark it handled so the
+                        // toplevel stop-on-error scan doesn't re-fail the feed.
                         m.diagnostic = .{ .context = p.capability.name };
-                        return Error.HostError;
+                        if (m.handlers.items.len > 0) p.handled = true;
+                        m.control = try m.raiseError(Error.HostError);
                     },
                     .outstanding => return .blocked,
                 },
@@ -575,6 +596,19 @@ pub const Machine = struct {
                 return m.callThunk(d.after);
             },
             .dw_after => |d| return .{ .value = d.result }, // `after` done; return thunk's value
+            .pop_handler => { // with-exception-handler thunk returned normally
+                _ = m.handlers.pop();
+                return .{ .value = v };
+            },
+            .raise_return => { // a non-continuable handler returned — an error
+                m.diagnostic = .{ .context = "handler-returned" };
+                m.raised = v;
+                return Error.Raised;
+            },
+            .restore_handler => |rh| { // raise-continuable handler returned v
+                try m.handlers.append(m.arena, rh.handler);
+                return .{ .value = v };
+            },
             .winders => |w| {
                 if (w.index < w.thunks.len) {
                     try m.pushFrame(.{ .winders = .{
@@ -591,6 +625,8 @@ pub const Machine = struct {
                 try m.frames.appendSlice(m.arena, try cloneFrames(m.arena, w.target.frames));
                 m.wind.clearRetainingCapacity();
                 try m.wind.appendSlice(m.arena, w.target.wind);
+                m.handlers.clearRetainingCapacity();
+                try m.handlers.appendSlice(m.arena, w.target.handlers);
                 return .{ .value = w.value };
             },
         }
@@ -611,6 +647,74 @@ pub const Machine = struct {
         if (items.len != 4) return Error.ArityMismatch; // dynamic-wind + 3
         try m.pushFrame(.{ .dw_before = .{ .before = items[1], .thunk = items[2], .after = items[3] } });
         return m.callThunk(items[1]);
+    }
+
+    // -- exceptions (tier 15D) --------------------------------------------
+
+    /// `(with-exception-handler handler thunk)`: install `handler` for the
+    /// dynamic extent of `thunk`, popping it when the thunk returns.
+    fn enterWithHandler(m: *Machine, collected: std.ArrayList(Value)) Error!Control {
+        const items = collected.items;
+        if (items.len != 3) return Error.ArityMismatch; // weh + handler + thunk
+        try m.handlers.append(m.arena, items[1]);
+        try m.pushFrame(.pop_handler);
+        return m.callThunk(items[2]);
+    }
+
+    /// `(raise obj)` / `(raise-continuable obj)`: invoke the current handler.
+    fn doRaise(m: *Machine, collected: std.ArrayList(Value), continuable: bool) Error!Control {
+        const items = collected.items;
+        if (items.len != 2) return Error.ArityMismatch;
+        return m.invokeHandler(items[1], continuable);
+    }
+
+    /// Invokes the current handler with `obj`, the outer handler installed for
+    /// its extent. `continuable` decides what happens if the handler returns:
+    /// re-install and continue (raise-continuable) vs. secondary error (raise).
+    fn invokeHandler(m: *Machine, obj: Value, continuable: bool) Error!Control {
+        if (m.handlers.items.len == 0) {
+            m.raised = obj;
+            return Error.Raised;
+        }
+        const h = m.handlers.pop().?;
+        if (continuable)
+            try m.pushFrame(.{ .restore_handler = .{ .handler = h } })
+        else
+            try m.pushFrame(.raise_return);
+        var call: std.ArrayList(Value) = .empty;
+        try call.append(m.arena, h);
+        try call.append(m.arena, obj);
+        return m.applyCollected(call);
+    }
+
+    /// Turns a catchable runtime error into an error object and hands it to the
+    /// current handler; if none (or the error is uncatchable), propagates it.
+    fn raiseError(m: *Machine, e: Error) Error!Control {
+        switch (e) {
+            // §5 resource bounds are uncatchable; OOM likewise. Also don't try
+            // to catch an already-uncaught raise or an oracle-only marker.
+            Error.LimitExceeded, Error.OutOfMemory, Error.Raised, Error.Unimplemented, Error.Unsupported => return e,
+            else => {},
+        }
+        if (m.handlers.items.len == 0) return e;
+        const obj = try m.makeErrorObject(e);
+        return m.invokeHandler(obj, false);
+    }
+
+    /// An error object matching the prelude's `(vector '%error-object msg
+    /// irritants)` shape: message = the §3 kind, irritants = the diagnostic.
+    fn makeErrorObject(m: *Machine, e: Error) Error!Value {
+        const vec = try m.arena.alloc(Value, 3);
+        vec[0] = .{ .symbol = "%error-object" };
+        vec[1] = .{ .string = try m.arena.dupe(u8, eval_mod.kindOf(e)) };
+        var irritants: Value = .empty_list;
+        if (m.diagnostic) |diag| {
+            const cell = try m.arena.create(Value.Pair);
+            cell.* = .{ .car = .{ .string = try m.arena.dupe(u8, diag.context) }, .cdr = .empty_list };
+            irritants = .{ .pair = cell };
+        }
+        vec[2] = irritants;
+        return .{ .vector = vec };
     }
 
     fn applyCollected(m: *Machine, collected: std.ArrayList(Value)) Error!Control {
@@ -637,6 +741,12 @@ pub const Machine = struct {
                     return m.captureContinuation(collected);
                 if (prim == &primitives.dynamic_wind_primitive)
                     return m.enterDynamicWind(collected);
+                if (prim == &primitives.with_exception_handler_primitive)
+                    return m.enterWithHandler(collected);
+                if (prim == &primitives.raise_primitive)
+                    return m.doRaise(collected, false);
+                if (prim == &primitives.raise_continuable_primitive)
+                    return m.doRaise(collected, true);
                 if (prim == &primitives.apply_primitive)
                     return m.applySpread(collected);
                 if (prim.strict_args) for (args, 0..) |a, i| {
@@ -754,6 +864,7 @@ pub const Machine = struct {
         snap.* = .{
             .frames = try cloneFrames(m.arena, m.frames.items),
             .wind = try m.arena.dupe(*WindEntry, m.wind.items),
+            .handlers = try m.arena.dupe(Value, m.handlers.items),
         };
         const k: Value = .{ .continuation = @ptrCast(snap) };
 
@@ -1955,6 +2066,48 @@ test "machine: syntax errors and fuel" {
 
     t.machine.?.limits.fuel = t.machine.?.fuel_used; // nothing left
     try std.testing.expectError(error.LimitExceeded, t.run("1"));
+}
+
+fn failHandler(_: *anyopaque, _: std.mem.Allocator, _: []const Value) capability_mod.HostError!Value {
+    return error.HostError;
+}
+
+test "machine: exceptions — guard/raise/error/raise-continuable (§15D)" {
+    var t = TestMachine.init();
+    defer t.deinit();
+    // guard catches a raise
+    try std.testing.expectEqualStrings("caught", (try t.run("(guard (e (#t 'caught)) (raise 'x))")).symbol);
+    // guard catches a runtime error
+    try std.testing.expectEqualStrings("rec", (try t.run("(guard (e (#t 'rec)) (car '()))")).symbol);
+    // clause dispatch: 42 is not a symbol -> else
+    try std.testing.expectEqualStrings("other", (try t.run("(guard (e ((symbol? e) 'sym) (else 'other)) (raise 42))")).symbol);
+    // error object message
+    try std.testing.expectEqualStrings("bad", (try t.run("(guard (e (#t (error-object-message e))) (error \"bad\" 1 2))")).string);
+    // raise-continuable: handler's return value continues
+    try std.testing.expectEqual(@as(i64, 101), (try t.run("(+ 1 (with-exception-handler (lambda (c) 100) (lambda () (raise-continuable 'x))))")).integer);
+    // no error -> body value
+    try std.testing.expectEqual(@as(i64, 7), (try t.run("(guard (e (#t 'no)) 7)")).integer);
+    // oracle has no exceptions (control feature, machine-only)
+    var ts = eval_mod.TestSession.init();
+    defer ts.deinit();
+    try std.testing.expectError(error.Unimplemented, ts.run("(with-exception-handler (lambda (c) 1) (lambda () (raise 'x)))"));
+}
+
+test "machine: guard catches a failed capability (host-error, §15D)" {
+    var t = TestMachine.init();
+    defer t.deinit();
+    _ = try t.run("1");
+    var dummy: u8 = 0;
+    const cap = capability_mod.Capability{ .name = "ask", .class = .external_independent, .ctx = &dummy, .handler = failHandler };
+    try capability_mod.register(t.machine.?.global, &cap);
+
+    // The + forces the ask result inside the guard extent, so ask's failure is
+    // caught and the fallback runs — the agent "tool failed, recover" case.
+    // (runToCompletion services ask via its handler, which fails.)
+    try std.testing.expectEqualStrings(
+        "fallback",
+        (try t.run("(guard (e (#t 'fallback)) (+ 0 (ask 1)))")).symbol,
+    );
 }
 
 test "machine: a failed feed abandons its outstanding calls" {

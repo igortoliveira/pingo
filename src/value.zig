@@ -72,6 +72,9 @@ pub const Value = union(enum) {
         capability: *const capability_mod.Capability,
         args: []const Value,
         state: State = .outstanding,
+        /// A failure routed to an exception handler (tier 15D): it was caught,
+        /// so it must not also fail the feed at the toplevel sync (§6 revision).
+        handled: bool = false,
 
         pub const State = union(enum) {
             outstanding,

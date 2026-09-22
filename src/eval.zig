@@ -29,6 +29,9 @@ pub const Error = error{
     /// docs/callcc.md): first-class continuations need the machine's explicit
     /// frame stack. The machine handles it; the oracle reports this.
     Unimplemented,
+    /// An exception reached the top with no handler (tier 15D). The raised
+    /// object is on the machine (`m.raised`); the feed aborts (§3).
+    Raised,
     OutOfMemory,
 };
 
@@ -64,6 +67,7 @@ pub fn kindOf(err: Error) []const u8 {
         Error.LimitExceeded => "limit-exceeded",
         Error.Unsupported => "bad-syntax", // unimplemented forms read as syntax for now
         Error.Unimplemented => "unimplemented",
+        Error.Raised => "uncaught-exception",
         Error.OutOfMemory => "limit-exceeded",
     };
 }
@@ -361,6 +365,9 @@ pub const Evaluator = struct {
             },
             .primitive => |p| {
                 if (p == &primitives.callcc_primitive) return Error.Unimplemented;
+                if (p == &primitives.raise_primitive or
+                    p == &primitives.raise_continuable_primitive or
+                    p == &primitives.with_exception_handler_primitive) return Error.Unimplemented;
                 if (p == &primitives.dynamic_wind_primitive) {
                     // No call/cc in the oracle, so no control transfer can
                     // cross the extent: plain sequencing is exact (§2).

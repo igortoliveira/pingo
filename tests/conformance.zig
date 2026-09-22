@@ -43,7 +43,7 @@ pub fn main(init: std.process.Init) !void {
     // mutation — deliberate). r7rs grows as tier-15 features land; the floor
     // guards against silently losing coverage.
     const r5_floor = 174;
-    const r7_floor = 385; // 15C records (+4); 15E when/unless/case-lambda/let-values (+3)
+    const r7_floor = 386; // 15C records (+4); 15E sugar (+3); 15D exceptions (+1)
     if (r5.pass < r5_floor or r7.pass < r7_floor) {
         std.debug.print("conformance fell below floor (r5rs {d}/{d}, r7rs {d}/{d})\n", .{ r5.pass, r5_floor, r7.pass, r7_floor });
         std.process.exit(1);
