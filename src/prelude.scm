@@ -128,16 +128,13 @@
 (define char-ci>=? (%ci char>=?))
 
 ;; promises (S2 Promises): delay expands to (%make-promise (lambda () e)).
-;; A promise memoizes on first force; force on a non-promise returns it.
-(define (%make-promise thunk) (vector '%promise #f thunk))
+;; Pure Pingo has no mutation, so force cannot memoize — it recomputes the
+;; thunk each time. With no side effects this is observationally identical
+;; (docs/purity.md). force on a non-promise returns it.
+(define (%make-promise thunk) (vector '%promise thunk))
 (define (force p)
-  (if (and (vector? p) (= (vector-length p) 3) (eq? (vector-ref p 0) '%promise))
-      (if (vector-ref p 1)
-          (vector-ref p 2)
-          (begin
-            (vector-set! p 2 ((vector-ref p 2)))
-            (vector-set! p 1 #t)
-            (vector-ref p 2)))
+  (if (and (vector? p) (= (vector-length p) 2) (eq? (vector-ref p 0) '%promise))
+      ((vector-ref p 1))
       p))
 
 ;; multiple values (S2 Multiple values): opaque wrapper; a single value
@@ -157,9 +154,3 @@
 ;; withdrawn here and reintroduced natively in the next commit.
 
 (define call-with-current-continuation call/cc)
-
-;; string output ports (S8J.2): build a string with an output port.
-(define (call-with-output-string proc)
-  (let ((port (open-output-string)))
-    (proc port)
-    (get-output-string port)))

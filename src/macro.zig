@@ -388,13 +388,12 @@ test "syntax-rules hygiene (oracle)" {
     var s = eval_mod.TestSession.init();
     defer s.deinit();
 
-    // (a) an introduced binder does not capture a user identifier
-    _ = try s.run("(define-syntax swap! (syntax-rules () ((_ a b) (let ((tmp a)) (set! a b) (set! b tmp)))))");
-    _ = try s.run("(define x 1)");
-    _ = try s.run("(define tmp 2)");
-    _ = try s.run("(swap! x tmp)");
-    try std.testing.expectEqual(@as(i64, 2), (try s.run("x")).integer);
-    try std.testing.expectEqual(@as(i64, 1), (try s.run("tmp")).integer);
+    // (a) an introduced binder does not capture a user identifier: the macro's
+    // temporary `t` must not shadow the `t` the user passes in.
+    _ = try s.run("(define-syntax my-or (syntax-rules () ((_ a b) (let ((t a)) (if t t b)))))");
+    // hygienic: introduced `t` is #f, so the result is the user's t (5); a
+    // captured (non-hygienic) `t` would shadow it and yield #f.
+    try std.testing.expectEqual(@as(i64, 5), (try s.run("(let ((t 5)) (my-or #f t))")).integer);
 
     // (b) a template's free reference stays bound to the definition scope
     // even when the use site shadows the name

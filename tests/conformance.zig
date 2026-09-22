@@ -13,7 +13,7 @@ const Value = pingo.value.Value;
 
 const suite = @embedFile("vendor/chibi-scheme/r5rs-tests.scm");
 
-const special_forms = [_][]const u8{ "quote", "if", "define", "lambda", "begin", "let", "let*", "letrec", "do", "case", "cond", "and", "or", "else", "set!", "delay", "define-syntax", "let-syntax", "letrec-syntax" };
+const special_forms = [_][]const u8{ "quote", "if", "define", "lambda", "begin", "let", "let*", "letrec", "do", "case", "cond", "and", "or", "else", "delay", "define-syntax", "let-syntax", "letrec-syntax" };
 
 pub fn main(init: std.process.Init) !void {
     var stdout_buffer: [4096]u8 = undefined;
@@ -67,7 +67,9 @@ pub fn main(init: std.process.Init) !void {
     if (fail > 0) std.process.exit(1);
     // Regression floor: raise this whenever new features convert skips to
     // passes; a drop means a feature silently stopped being recognized.
-    const pass_floor = 183;
+    // Purity (tier 14): Pingo dropped mutation, so R5RS assignment tests no
+    // longer pass — a deliberate divergence, not a regression (docs/purity.md).
+    const pass_floor = 173;
     if (pass < pass_floor) {
         std.debug.print("conformance: pass count {d} fell below the floor {d}\n", .{ pass, pass_floor });
         std.process.exit(1);

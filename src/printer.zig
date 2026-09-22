@@ -75,7 +75,6 @@ fn writeValueDepth(v: Value, w: *std.Io.Writer, depth: usize, display: bool) std
         .pending => |p| try w.print("#<pending {s}>", .{p.capability.name}),
         .continuation => try w.writeAll("#<continuation>"),
         .macro => try w.writeAll("#<macro>"),
-        .port => |p| try w.writeAll(if (p.input) "#<input-port>" else "#<output-port>"),
         .vector => |items| {
             try w.writeAll("#(");
             for (items, 0..) |item, i| {

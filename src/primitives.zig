@@ -98,8 +98,6 @@ const table = [_]Value.Primitive{
     .{ .name = "ceiling", .func = ceilingFn },
     .{ .name = "truncate", .func = truncateFn },
     .{ .name = "round", .func = roundFn },
-    .{ .name = "set-car!", .func = setCar },
-    .{ .name = "set-cdr!", .func = setCdr },
     .{ .name = "char?", .func = isChar },
     .{ .name = "char->integer", .func = charToInt },
     .{ .name = "integer->char", .func = intToChar },
@@ -115,11 +113,9 @@ const table = [_]Value.Primitive{
     .{ .name = "string", .func = stringOfChars },
     .{ .name = "string-length", .func = stringLength },
     .{ .name = "string-ref", .func = stringRef },
-    .{ .name = "string-set!", .func = stringSet },
     .{ .name = "substring", .func = substringFn },
     .{ .name = "string-append", .func = stringAppend },
     .{ .name = "string-copy", .func = stringCopy },
-    .{ .name = "string-fill!", .func = stringFill },
     .{ .name = "string->list", .func = stringToList },
     .{ .name = "list->string", .func = listToString },
     .{ .name = "string=?", .func = strEq },
@@ -135,26 +131,14 @@ const table = [_]Value.Primitive{
     .{ .name = "string->number", .func = stringToNumber },
     .{ .name = "boolean?", .func = isBoolean },
     .{ .name = "procedure?", .func = isProcedure },
-    // I/O: string output ports (tier 8J.2). Pure guest state, no authority.
-    .{ .name = "open-output-string", .func = openOutputString },
-    .{ .name = "get-output-string", .func = getOutputString },
-    .{ .name = "write-char", .func = writeCharPort },
-    .{ .name = "write-string", .func = writeStringPort },
-    .{ .name = "write", .func = writePort },
-    .{ .name = "display", .func = displayPort },
-    .{ .name = "newline", .func = newlinePort },
-    .{ .name = "port?", .func = isPort },
-    .{ .name = "output-port?", .func = isOutputPort },
     .{ .name = "vector?", .func = isVector },
     .{ .name = "make-vector", .func = makeVector },
     // like list/cons, vector only stores — pendings may flow in (§4)
     .{ .name = "vector", .func = vectorOfArgs, .strict_args = false },
     .{ .name = "vector-length", .func = vectorLength },
     .{ .name = "vector-ref", .func = vectorRef },
-    .{ .name = "vector-set!", .func = vectorSet },
     .{ .name = "vector->list", .func = vectorToList },
     .{ .name = "list->vector", .func = listToVector },
-    .{ .name = "vector-fill!", .func = vectorFill },
 };
 
 fn asVector(v: Value) PrimitiveError![]Value {
@@ -197,12 +181,6 @@ fn vectorRef(_: std.mem.Allocator, args: []const Value) PrimitiveError!Value {
     return items[try vectorIndex(items, args[1])];
 }
 
-fn vectorSet(_: std.mem.Allocator, args: []const Value) PrimitiveError!Value {
-    try exactly(args, 3);
-    const items = try asVector(args[0]);
-    items[try vectorIndex(items, args[1])] = args[2];
-    return .unspecified;
-}
 
 fn vectorToList(arena: std.mem.Allocator, args: []const Value) PrimitiveError!Value {
     try exactly(args, 1);
@@ -235,11 +213,6 @@ fn listToVector(arena: std.mem.Allocator, args: []const Value) PrimitiveError!Va
     return .{ .vector = try arena.dupe(Value, items.items) };
 }
 
-fn vectorFill(_: std.mem.Allocator, args: []const Value) PrimitiveError!Value {
-    try exactly(args, 2);
-    @memset(try asVector(args[0]), args[1]);
-    return .unspecified;
-}
 
 fn isSymbol(_: std.mem.Allocator, args: []const Value) PrimitiveError!Value {
     try exactly(args, 1);
@@ -257,79 +230,6 @@ fn isProcedure(_: std.mem.Allocator, args: []const Value) PrimitiveError!Value {
         .closure, .primitive, .capability, .continuation => true,
         else => false,
     } };
-}
-
-// -- I/O: string output ports (tier 8J.2) ---------------------------------
-
-fn asOutputPort(v: Value) PrimitiveError!*Value.Port {
-    if (v != .port or v.port.input) return error.TypeError;
-    return v.port;
-}
-
-fn openOutputString(arena: std.mem.Allocator, args: []const Value) PrimitiveError!Value {
-    try exactly(args, 0);
-    const p = try arena.create(Value.Port);
-    p.* = .{ .input = false };
-    return .{ .port = p };
-}
-
-fn getOutputString(arena: std.mem.Allocator, args: []const Value) PrimitiveError!Value {
-    try exactly(args, 1);
-    const p = try asOutputPort(args[0]);
-    return .{ .string = try arena.dupe(u8, p.out.items) };
-}
-
-/// Appends the rendered `v` (write or display form) to the port's buffer.
-fn emitValue(arena: std.mem.Allocator, port: *Value.Port, v: Value, display: bool) PrimitiveError!void {
-    var buf = std.Io.Writer.Allocating.init(arena);
-    defer buf.deinit();
-    if (display) printer_mod.displayValue(v, &buf.writer) catch return error.OutOfMemory else printer_mod.writeValue(v, &buf.writer) catch return error.OutOfMemory;
-    try port.out.appendSlice(arena, buf.written());
-}
-
-fn writeCharPort(arena: std.mem.Allocator, args: []const Value) PrimitiveError!Value {
-    try exactly(args, 2);
-    const c = try asChar(args[0]);
-    const p = try asOutputPort(args[1]);
-    try p.out.append(arena, c);
-    return .unspecified;
-}
-
-fn writeStringPort(arena: std.mem.Allocator, args: []const Value) PrimitiveError!Value {
-    try exactly(args, 2);
-    const s = try asString(args[0]);
-    const p = try asOutputPort(args[1]);
-    try p.out.appendSlice(arena, s);
-    return .unspecified;
-}
-
-fn writePort(arena: std.mem.Allocator, args: []const Value) PrimitiveError!Value {
-    try exactly(args, 2);
-    try emitValue(arena, try asOutputPort(args[1]), args[0], false);
-    return .unspecified;
-}
-
-fn displayPort(arena: std.mem.Allocator, args: []const Value) PrimitiveError!Value {
-    try exactly(args, 2);
-    try emitValue(arena, try asOutputPort(args[1]), args[0], true);
-    return .unspecified;
-}
-
-fn newlinePort(arena: std.mem.Allocator, args: []const Value) PrimitiveError!Value {
-    try exactly(args, 1);
-    const p = try asOutputPort(args[0]);
-    try p.out.append(arena, '\n');
-    return .unspecified;
-}
-
-fn isPort(_: std.mem.Allocator, args: []const Value) PrimitiveError!Value {
-    try exactly(args, 1);
-    return .{ .boolean = args[0] == .port };
-}
-
-fn isOutputPort(_: std.mem.Allocator, args: []const Value) PrimitiveError!Value {
-    try exactly(args, 1);
-    return .{ .boolean = args[0] == .port and !args[0].port.input };
 }
 
 fn symbolToString(arena: std.mem.Allocator, args: []const Value) PrimitiveError!Value {
@@ -436,12 +336,6 @@ fn stringRef(_: std.mem.Allocator, args: []const Value) PrimitiveError!Value {
     return .{ .char = s[try stringIndex(s, args[1])] };
 }
 
-fn stringSet(_: std.mem.Allocator, args: []const Value) PrimitiveError!Value {
-    try exactly(args, 3);
-    const s = try asString(args[0]);
-    s[try stringIndex(s, args[1])] = try asChar(args[2]);
-    return .unspecified;
-}
 
 fn substringFn(arena: std.mem.Allocator, args: []const Value) PrimitiveError!Value {
     try exactly(args, 3);
@@ -470,11 +364,6 @@ fn stringCopy(arena: std.mem.Allocator, args: []const Value) PrimitiveError!Valu
     return .{ .string = try arena.dupe(u8, try asString(args[0])) };
 }
 
-fn stringFill(_: std.mem.Allocator, args: []const Value) PrimitiveError!Value {
-    try exactly(args, 2);
-    @memset(try asString(args[0]), try asChar(args[1]));
-    return .unspecified;
-}
 
 fn stringToList(arena: std.mem.Allocator, args: []const Value) PrimitiveError!Value {
     try exactly(args, 1);
@@ -611,19 +500,7 @@ fn charLower(_: std.mem.Allocator, args: []const Value) PrimitiveError!Value {
     return charPred(args, std.ascii.isLower);
 }
 
-fn setCar(_: std.mem.Allocator, args: []const Value) PrimitiveError!Value {
-    try exactly(args, 2);
-    if (args[0] != .pair) return error.TypeError;
-    args[0].pair.car = args[1];
-    return .unspecified;
-}
 
-fn setCdr(_: std.mem.Allocator, args: []const Value) PrimitiveError!Value {
-    try exactly(args, 2);
-    if (args[0] != .pair) return error.TypeError;
-    args[0].pair.cdr = args[1];
-    return .unspecified;
-}
 
 fn intDiv2(args: []const Value, comptime f: fn (i64, i64) i64) PrimitiveError!Value {
     try exactly(args, 2);
@@ -1126,7 +1003,6 @@ pub fn eqValues(a: Value, b: Value) bool {
         .pending => a.pending == b.pending,
         .continuation => a.continuation == b.continuation,
         .macro => a.macro == b.macro,
-        .port => a.port == b.port,
         .vector => a.vector.ptr == b.vector.ptr and a.vector.len == b.vector.len,
     };
 }
@@ -1161,8 +1037,9 @@ fn div(_: std.mem.Allocator, args: []const Value) PrimitiveError!Value {
 
 // -- tests ---------------------------------------------------------------
 
-/// Builds `(1 2 . <cycle back to head>)` by hand — guest code can't make one
-/// until set-cdr! exists, but the walkers must already survive it.
+/// Builds `(1 2 . <cycle back to head>)` by hand. Pure Pingo has no mutation,
+/// so guest code can never make a cycle; the walkers stay cycle-safe anyway as
+/// defense in depth (a host capability could, in principle, hand one back).
 fn makeCycle(arena: std.mem.Allocator) !Value {
     const a = try arena.create(Value.Pair);
     const b = try arena.create(Value.Pair);

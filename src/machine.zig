@@ -418,14 +418,7 @@ pub const Machine = struct {
                     return .{ .expr = .{ .d = try expand.expandQuasiquote(m.arena, p.cdr), .env = x.env } };
                 if (isForm(p, "unquote") or isForm(p, "unquote-splicing"))
                     return Error.BadSyntax; // only meaningful inside quasiquote
-                if (isForm(p, "set!")) {
-                    const a = p.cdr;
-                    if (a != .pair or a.pair.car != .symbol) return Error.BadSyntax;
-                    if (a.pair.cdr != .pair or a.pair.cdr.pair.cdr != .empty_list)
-                        return Error.BadSyntax;
-                    try m.pushFrame(.{ .assign = .{ .name = a.pair.car.symbol, .env = x.env } });
-                    return .{ .expr = .{ .d = a.pair.cdr.pair.car, .env = x.env } };
-                }
+                if (isForm(p, "set!")) return Error.BadSyntax; // no mutation (docs/purity.md)
                 if (isForm(p, "lambda"))
                     return .{ .value = try value_mod.makeClosure(m.arena, p.cdr, x.env) };
                 if (isForm(p, "let"))
@@ -1077,15 +1070,16 @@ test "machine: call/cc capture and invoke (machine-only; oracle Unimplemented)" 
     try std.testing.expectError(error.ArityMismatch, t.run("(call/cc (lambda (k) (k 1 2)))"));
     try std.testing.expectError(error.ArityMismatch, t.run("(call/cc)"));
 
-    // multi-shot re-entry with shared bindings: set! accumulates across the
-    // three invocations (variables are shared, not captured — docs/callcc.md)
-    try std.testing.expectEqual(@as(i64, 6), (try t.run(
-        \\(let ((saved #f) (count 0) (sum 0))
-        \\  (let ((n (call/cc (lambda (k) (set! saved k) 1))))
-        \\    (set! sum (+ sum n))
-        \\    (set! count (+ count 1))
-        \\    (if (< count 3) (saved (+ n 1)) sum)))
+    // multi-shot re-entry (pure Pingo has no set! to accumulate with): the
+    // continuation flows out as a value and is re-invoked; a host counter
+    // bounds the loop and observes each pass. Result is the final count.
+    var counter = CounterHost{};
+    const ncap = capability_mod.Capability{ .name = "next", .class = .external_independent, .ctx = &counter, .handler = CounterHost.handle };
+    try capability_mod.register(t.machine.?.global, &ncap);
+    try std.testing.expectEqual(@as(i64, 3), (try t.run(
+        "(let ((k (call/cc (lambda (c) c)))) (let ((n (next))) (if (< n 3) (k k) n)))",
     )).integer);
+    try std.testing.expectEqual(@as(i64, 3), counter.n);
 
     // the oracle refuses call/cc
     var ts = eval_mod.TestSession.init();
@@ -1093,12 +1087,27 @@ test "machine: call/cc capture and invoke (machine-only; oracle Unimplemented)" 
     try std.testing.expectError(error.Unimplemented, ts.run("(call/cc (lambda (k) 1))"));
 }
 
-const CountHost = struct {
-    calls: usize = 0,
+/// Returns an incrementing integer on each call — the pure way to bound a
+/// continuation-driven loop and observe re-entry (no `set!` in the guest).
+const CounterHost = struct {
+    n: i64 = 0,
     fn handle(ctx: *anyopaque, _: std.mem.Allocator, _: []const Value) capability_mod.HostError!Value {
-        const h: *CountHost = @ptrCast(@alignCast(ctx));
-        h.calls += 1;
-        return .{ .integer = 7 };
+        const h: *CounterHost = @ptrCast(@alignCast(ctx));
+        h.n += 1;
+        return .{ .integer = h.n };
+    }
+};
+
+/// Records each call's first (symbol) argument in dispatch order — observes an
+/// effect sequence without guest mutation.
+const RecordHost = struct {
+    log: std.ArrayListUnmanaged([]const u8) = .empty,
+    arena: std.mem.Allocator,
+    fn handle(ctx: *anyopaque, _: std.mem.Allocator, args: []const Value) capability_mod.HostError!Value {
+        const h: *RecordHost = @ptrCast(@alignCast(ctx));
+        if (args.len > 0 and args[0] == .symbol)
+            h.log.append(h.arena, args[0].symbol) catch return error.OutOfMemory;
+        return .unspecified;
     }
 };
 
@@ -1125,19 +1134,14 @@ test "machine: re-entering a continuation re-dispatches its calls" {
     var t = TestMachine.init();
     defer t.deinit();
     _ = try t.run("1");
-    const m = &t.machine.?;
-    var host = CountHost{};
-    const cap = capability_mod.Capability{ .name = "ask", .class = .external_independent, .ctx = &host, .handler = CountHost.handle };
-    try capability_mod.register(m.global, &cap);
+    var counter = CounterHost{};
+    const cap = capability_mod.Capability{ .name = "ask", .class = .external_independent, .ctx = &counter, .handler = CounterHost.handle };
+    try capability_mod.register(t.machine.?.global, &cap);
 
-    // k is captured before the ask; invoked once, so ask runs twice.
-    _ = try t.run(
-        \\(let ((k #f) (done #f))
-        \\  (let ((x (call/cc (lambda (c) (set! k c) 0))))
-        \\    (ask 1)
-        \\    (if done 'end (begin (set! done #t) (k 1)))))
-    );
-    try std.testing.expectEqual(@as(usize, 2), host.calls);
+    // k is captured before `ask`; re-invoking it re-runs `ask`, so the
+    // capability dispatches twice (the counter also bounds the loop).
+    _ = try t.run("(let ((k (call/cc (lambda (c) c)))) (if (< (ask) 2) (k k) 'done))");
+    try std.testing.expectEqual(@as(i64, 2), counter.n);
 }
 
 test "machine: continuation program agrees under reverse completion order" {
@@ -1172,21 +1176,29 @@ test "machine: continuation program agrees under reverse completion order" {
 test "machine: dynamic-wind unwinds and rewinds across a re-entered continuation" {
     var t = TestMachine.init();
     defer t.deinit();
-    // Re-entering the continuation captured inside the thunk re-runs `before`
-    // (connect) on entry and `after` (disconnect) on exit (R5RS, docs/callcc.md).
-    const v = try t.run(
-        \\(let ((path '()) (c #f))
-        \\  (let ((add (lambda (s) (set! path (cons s path)))))
-        \\    (dynamic-wind
-        \\      (lambda () (add 'connect))
-        \\      (lambda () (add (call/cc (lambda (c0) (set! c c0) 'talk1))))
-        \\      (lambda () (add 'disconnect)))
-        \\    (if (< (length path) 4) (c 'talk2) (reverse path))))
+    _ = try t.run("1");
+    const arena = t.arena_state.allocator();
+    var rec = RecordHost{ .arena = arena };
+    var counter = CounterHost{};
+    const rcap = capability_mod.Capability{ .name = "rec", .class = .external_independent, .ctx = &rec, .handler = RecordHost.handle };
+    const ncap = capability_mod.Capability{ .name = "n", .class = .external_independent, .ctx = &counter, .handler = CounterHost.handle };
+    try capability_mod.register(t.machine.?.global, &rcap);
+    try capability_mod.register(t.machine.?.global, &ncap);
+
+    // The continuation captured inside the thunk flows out as the dynamic-wind
+    // value; re-invoking it rewinds `before` and unwinds `after` (R5RS,
+    // docs/callcc.md). Effects are observed through a recording capability,
+    // since pure Pingo has no mutation to build a path list with.
+    _ = try t.run(
+        \\(let ((k (dynamic-wind
+        \\           (lambda () (rec 'before))
+        \\           (lambda () (call/cc (lambda (c) c)))
+        \\           (lambda () (rec 'after)))))
+        \\  (if (< (n) 2) (k k) 'done))
     );
-    var out = std.Io.Writer.Allocating.init(std.testing.allocator);
-    defer out.deinit();
-    try printer_mod.writeValue(v, &out.writer);
-    try std.testing.expectEqualStrings("(connect talk1 disconnect connect talk2 disconnect)", out.written());
+    try std.testing.expectEqual(@as(usize, 4), rec.log.items.len);
+    const expected = [_][]const u8{ "before", "after", "before", "after" };
+    for (expected, rec.log.items) |e, got| try std.testing.expectEqualStrings(e, got);
 }
 
 test "machine: tail calls keep the frame stack flat" {
@@ -1665,7 +1677,7 @@ test "differential: machine and oracle agree on a form corpus" {
         "(define-syntax lastf (syntax-rules () ((_ a r ... z) (list z r ... a)))) (lastf 1 2 3 4 5)",
         "(define-syntax nn (syntax-rules () ((_ (a ...) ...) (list (list a ...) ...)))) (nn (1 2) (3) ())",
         // hygiene (8I.4): introduced tmp does not capture; quoted data literal
-        "(define-syntax sw (syntax-rules () ((_ a b) (let ((tmp a)) (set! a b) (set! b tmp))))) (define p 1) (define tmp 2) (sw p tmp) (list p tmp)",
+        "(define-syntax my-or (syntax-rules () ((_ a b) (let ((t a)) (if t t b))))) (let ((t 5)) (my-or #f t))",
         "(define-syntax tq (syntax-rules () ((_) 'lit))) (tq)",
         // let-syntax / letrec-syntax (8I.5)
         "(let-syntax ((dbl (syntax-rules () ((_ x) (+ x x))))) (dbl 21))",
@@ -1674,11 +1686,6 @@ test "differential: machine and oracle agree on a form corpus" {
         // custom ellipsis + escape (8I.6)
         "(let-syntax ((foo (syntax-rules ::: () ((foo ... args :::) (args ::: ...))))) (foo 3 - 5))",
         "(define-syntax lit (syntax-rules () ((_) (quote (a (... ...) b))))) (lit)",
-        // string output ports (8J.2)
-        "(call-with-output-string (lambda (p) (write \"hi\" p) (display \"hi\" p)))",
-        "(call-with-output-string (lambda (p) (display (list 1 2 3) p)))",
-        "(let ((p (open-output-string))) (write-char #\\x p) (newline p) (get-output-string p))",
-        "(list (port? (open-output-string)) (output-port? (open-output-string)) (port? 5))",
         // internal defines (8H'.2): a body opening with defines is a letrec
         "((lambda () (define x 1) (define (f n) (if (= n 0) x (f (- n 1)))) (f 3)))",
         "(define (parity n) (define (e? k) (if (= k 0) #t (o? (- k 1)))) (define (o? k) (if (= k 0) #f (e? (- k 1)))) (e? n)) (parity 10)",
@@ -1690,7 +1697,6 @@ test "differential: machine and oracle agree on a form corpus" {
         "((lambda () (define x 1) (define x 2) x))",
         // delay/force (8H'.4): memoized on first force
         "(force (delay (+ 1 2)))",
-        "(define n 0) (define p (delay (begin (set! n (+ n 1)) n))) (+ (force p) (force p))",
         "(force 42)",
         "(force (force (delay (delay 7))))",
         "(delay)",
@@ -1702,10 +1708,8 @@ test "differential: machine and oracle agree on a form corpus" {
         "(call-with-values (lambda () (values)) (lambda () 'none))",
         "(call-with-values (lambda () 5) (lambda (x) (* x 2)))",
         "(call-with-values (lambda () (values 1 2)) (lambda (x) x))",
-        // dynamic-wind (8H'.6 / native 8H''.3): order, value, arity. The
-        // continuation re-entry case is machine-only (oracle has no call/cc)
-        // and lives in a dedicated test.
-        "(define order '()) (define (add s) (set! order (cons s order))) (dynamic-wind (lambda () (add 'a)) (lambda () (add 'b) 'r) (lambda () (add 'c))) (reverse order)",
+        // dynamic-wind (8H'.6 / native 8H''.3): value + arity (the effectful
+        // re-entry case is machine-only and lives in a dedicated test).
         "(dynamic-wind (lambda () 1) (lambda () 2) (lambda () 3))",
         "(dynamic-wind (lambda () 1) (lambda () 2))",
         // rest args (8F'.4)
@@ -1784,20 +1788,9 @@ test "differential: machine and oracle agree on a form corpus" {
         "(floor 3)",
         "(list (even? 4) (odd? 4) (even? -3))",
         "(list (gcd 12 18) (gcd) (lcm 4 6) (lcm))",
-        // set! (8C.2)
-        "(define x 1) (set! x 2) x",
-        "(define (counter) (let ((n 0)) (lambda () (set! n (+ n 1)) n))) (define c (counter)) (c) (c) (c)",
-        "(let ((y 1)) (set! y (+ y 10)) y)",
-        "(set! nope 1)",
-        "(set! 3 1)",
-        "(set!)",
-        // pair mutation (8C.4) — including guest-made cycles hitting walkers
-        "(define p (cons 1 2)) (set-car! p 10) (set-cdr! p 20) p",
-        "(define q (list 1 2 3)) (set-car! (cdr q) 'two) q",
-        "(set-car! 5 1)",
-        "(define c (list 1 2)) (set-cdr! (cdr c) c) (list? c)",
-        "(define c2 (list 1 2)) (set-cdr! (cdr c2) c2) (length c2)",
-        "(define c3 (list 1 2)) (set-cdr! (cdr c3) c3) (equal? c3 c3)",
+        // no mutation (tier 14, docs/purity.md): set! and the mutators are
+        // syntax/unbound errors in both engines.
+        "(set! x 1)",
         // chars (8D.2)
         "#\\a",
         "'(#\\space #\\newline #\\A #\\0 #\\()",
@@ -1819,14 +1812,11 @@ test "differential: machine and oracle agree on a form corpus" {
         "(string #\\h #\\i)",
         "(string-length \"hello\")",
         "(string-ref \"abc\" 1)",
-        "(define s (string-copy \"abc\")) (string-set! s 0 #\\X) s",
-        "(define t \"lit\") (string-set! t 0 #\\L) t",
         "(substring \"hello\" 1 3)",
         "(substring \"hello\" 3 2)",
         "(string-append \"foo\" \"\" \"bar\")",
         "(string->list \"ab\")",
         "(list->string '(#\\a #\\b))",
-        "(define f (make-string 2 #\\-)) (string-fill! f #\\*) f",
         "(list (string=? \"a\" \"a\") (string<? \"abc\" \"abd\") (string>=? \"b\" \"a\"))",
         "(string-ci=? \"AbC\" \"abc\")",
         "(string-ref \"abc\" 9)",
@@ -1850,11 +1840,8 @@ test "differential: machine and oracle agree on a form corpus" {
         "(vector-length #(a b c))",
         "(vector-ref #(a b c) 1)",
         "(vector-ref #(a) 5)",
-        "(define v (make-vector 2 0)) (vector-set! v 1 'x) v",
         "(vector->list #(1 2 3))",
         "(list->vector '(1 2))",
-        "(define fv (make-vector 2 0)) (vector-fill! fv 9) fv",
-        "(define sv #(1 2)) (vector-set! sv 0 99) sv",
         // quasiquote (8G.2)
         "`(1 ,(+ 1 1) 3)",
         "(define qx 5) `(qx ,qx)",
@@ -1938,32 +1925,27 @@ test "machine: syntax errors and fuel" {
     try std.testing.expectError(error.LimitExceeded, t.run("1"));
 }
 
-test "machine: pendings abandoned by a failed feed settle as failed" {
+test "machine: a failed feed abandons its outstanding calls" {
     var t = TestMachine.init();
     defer t.deinit();
-    _ = try t.run("(define g 0)");
+    _ = try t.run("1");
     const arena = t.arena_state.allocator();
     const m = &t.machine.?;
     var dummy: u8 = 0;
     const cap = capability_mod.Capability{ .name = "ask", .class = .external_independent, .ctx = &dummy, .handler = nopHandler };
     try capability_mod.register(m.global, &cap);
 
-    // Dispatches ask (eager continue), stores the unsettled pending into g
-    // through non-strict list + assign, then fails the feed with the call
-    // still outstanding.
+    // Dispatches ask (eager continue), then errors with the call still
+    // outstanding. (In pure Pingo a pending cannot escape into surviving state
+    // — there is no mutation — so it can only be abandoned, never later
+    // forced.)
     try std.testing.expectError(
         Error.TypeError,
-        m.evalToplevel(try readOne(arena, "(begin (set! g (list (ask 1))) (car '()))")),
+        m.evalToplevel(try readOne(arena, "(begin (list (ask 1)) (car '()))")),
     );
     try std.testing.expectEqual(@as(usize, 1), m.outstanding().len);
 
-    // The next feed abandons that call (§4: settles as failed); forcing the
-    // escaped pending is host-error, not a wait on an untracked call.
-    try std.testing.expectError(
-        Error.HostError,
-        m.evalToplevel(try readOne(arena, "(car g)")),
-    );
-
-    // and the session stays usable
+    // The next feed abandons the leftover call (§4) and the session is usable.
     try std.testing.expectEqual(@as(i64, 2), (try t.run("(+ 1 1)")).integer);
+    try std.testing.expectEqual(@as(usize, 0), m.outstanding().len);
 }
