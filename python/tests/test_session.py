@@ -129,6 +129,45 @@ def test_on_batch_hook():
     assert [len(b.calls) for b in chained] == [1, 1]
 
 
+def test_streaming_overlaps_across_stages():
+    """A fast pipeline's second stage must start before a slow pipeline's
+    first stage finishes — cross-stage streaming, not a per-round barrier."""
+    import time as _t
+
+    events: list[tuple[str, float]] = []
+
+    async def f(tag, delay):
+        await asyncio.sleep(delay)
+        events.append((f"f:{tag}:done", _t.monotonic()))
+        return tag
+
+    async def g(tag):
+        events.append((f"g:{tag}:start", _t.monotonic()))
+        await asyncio.sleep(0.01)
+        return tag
+
+    async def main():
+        async with Session() as s:
+            s.define_async("f", f)
+            s.define_async("g", g)
+            # two independent pipelines: fast (a) and slow (b)
+            return await s.run(
+                '(list (g (f "a" 0.01)) (g (f "b" 0.20)))'
+            )
+
+    try:
+        Session()
+    except LibraryNotFound:
+        pytest.skip("libpingo not built (run `zig build`)")
+
+    asyncio.run(main())
+    g_a_start = next(t for name, t in events if name == "g:a:start")
+    f_b_done = next(t for name, t in events if name == "f:b:done")
+    # g(a) must start well before f(b) finishes — the barrier model would
+    # force g(a) to wait for the whole first stage (incl. f(b)).
+    assert g_a_start < f_b_done
+
+
 def test_async_result():
     async def double(n):
         return n * 2

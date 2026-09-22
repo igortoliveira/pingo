@@ -148,56 +148,70 @@ class Session:
             raise ValueError(f"could not register capability {name!r}")
 
     async def run(self, src: str, *, on_batch: Callable[[Batch], None] | None = None) -> Any:
-        """Feeds `src` and drives the blocked/resolve loop, running each batch
-        of outstanding capability calls concurrently. Returns the last form's
-        value; raises `PingoError` on failure.
+        """Feeds `src` and drives the blocked/resolve loop, **streaming** the
+        capability calls: each call runs as its own asyncio task, and the
+        moment any finishes it is resolved and the machine advanced — a
+        completed call unlocks its dependents without waiting for its siblings
+        (the λᴼ model, `docs/host.md`). Independent calls still overlap; a
+        pipeline like `(map g (map f xs))` also overlaps across stages. Returns
+        the last form's value; raises `PingoError` on failure.
 
-        Pass `on_batch` to observe each serviced batch: it receives a `Batch`
-        (the calls that ran together and the wall-clock seconds they took),
-        making the opportunistic parallelism visible without reaching into the
-        session's internals."""
+        Pass `on_batch` to observe dispatch: it fires once per machine step
+        with a `Batch` of the calls newly dispatched at that step (and the
+        seconds until that step's first completion) — the parallelism made
+        visible, without reaching into the session."""
         status = self._lib.pingo_feed(self._ptr, src.encode("utf-8"))
+        inflight: dict[asyncio.Future[tuple[Any, bool]], int] = {}
+        inflight_tokens: set[int] = set()
+
         while status == BLOCKED:
-            await self._service_batch(on_batch)
+            # Launch tasks for calls dispatched since the last step.
+            newly: list[str] = []
+            for i in range(self._lib.pingo_outstanding_count(self._ptr)):
+                token = self._lib.pingo_call_token(self._ptr, i)
+                if token in inflight_tokens:
+                    continue
+                name = (self._lib.pingo_call_name(self._ptr, token) or b"").decode("utf-8")
+                args = loads((self._lib.pingo_call_args(self._ptr, token) or b"").decode("utf-8"))
+                fut = asyncio.ensure_future(self._invoke(name, args))
+                inflight[fut] = token
+                inflight_tokens.add(token)
+                if on_batch is not None:
+                    newly.append(f"{name}{self._render_args(token)}")
+
+            assert inflight, "blocked implies an outstanding call (§4 invariant)"
+
+            started = time.monotonic()
+            done, _ = await asyncio.wait(inflight.keys(), return_when=asyncio.FIRST_COMPLETED)
+            if on_batch is not None and newly:
+                on_batch(Batch(tuple(newly), time.monotonic() - started))
+
+            for fut in done:
+                token = inflight.pop(fut)
+                inflight_tokens.discard(token)
+                result, ok = fut.result()
+                if ok:
+                    self._lib.pingo_resolve(self._ptr, token, dumps(result).encode("utf-8"))
+                else:
+                    self._lib.pingo_resolve_failure(self._ptr, token)
+
             status = self._lib.pingo_continue(self._ptr)
+
         if status == ERROR:
             raise PingoError(self._error())
         return loads(self._lib.pingo_result(self._ptr).decode("utf-8"))
 
-    async def _service_batch(self, on_batch: Callable[[Batch], None] | None = None) -> None:
-        count = self._lib.pingo_outstanding_count(self._ptr)
-        tokens = [self._lib.pingo_call_token(self._ptr, i) for i in range(count)]
+    async def _invoke(self, name: str, args: Any) -> tuple[Any, bool]:
+        handler = self._async_handlers.get(name)
+        if handler is None:
+            return None, False
+        try:
+            return await handler(*args), True
+        except Exception:  # noqa: BLE001 - any failure is a host-error
+            return None, False
 
-        # Render the calls only when observed — the C reads aren't free.
-        calls: list[str] | None = None
-        if on_batch is not None:
-            calls = []
-            for token in tokens:
-                name = (self._lib.pingo_call_name(self._ptr, token) or b"").decode("utf-8")
-                args = (self._lib.pingo_call_args(self._ptr, token) or b"").decode("utf-8")
-                calls.append(f"{name}{args}")
-
-        async def one(token: int) -> tuple[int, Any, bool]:
-            name = self._lib.pingo_call_name(self._ptr, token).decode("utf-8")
-            args = loads(self._lib.pingo_call_args(self._ptr, token).decode("utf-8"))
-            handler = self._async_handlers.get(name)
-            if handler is None:
-                return token, None, False
-            try:
-                return token, await handler(*args), True
-            except Exception:  # noqa: BLE001 - any failure is a host-error
-                return token, None, False
-
-        started = time.monotonic()
-        results = await asyncio.gather(*(one(t) for t in tokens))
-        for token, result, ok in results:
-            if ok:
-                self._lib.pingo_resolve(self._ptr, token, dumps(result).encode("utf-8"))
-            else:
-                self._lib.pingo_resolve_failure(self._ptr, token)
-
-        if on_batch is not None:
-            on_batch(Batch(tuple(calls), time.monotonic() - started))
+    def _render_args(self, token: int) -> str:
+        return (self._lib.pingo_call_args(self._ptr, token) or b"").decode("utf-8")
 
     # -- misc -------------------------------------------------------------
 
