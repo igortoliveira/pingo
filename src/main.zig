@@ -317,11 +317,13 @@ fn latencyOf(tools: []const SimTool, replay_tools: []const ReplayTool, cap: *con
 }
 
 /// Native async host (docs/host.md): the real completion source is a libxev
-/// event loop. Each simulated tool call arms an `xev.Timer` for its latency in
-/// **wall-clock** time; a batch of independent calls arms concurrent timers, so
-/// the run finishes in about the slowest latency, not their sum — real overlap,
-/// on kqueue/io_uring, from plain sequential Scheme. This is the adapter the
-/// design doc names; the machine (sans-I/O) is unchanged.
+/// event loop, and it **streams** like λᴼ — each tool call arms its own
+/// `xev.Timer` for its latency in wall-clock time, and when a timer fires the
+/// call is resolved and the machine pumped *inside the callback*, so a
+/// completed call's dependents dispatch immediately (arming their own timers)
+/// while siblings are still in flight. No per-round barrier; overlap is both
+/// within a fan-out and across pipeline stages. The machine (sans-I/O) is
+/// unchanged.
 const AsyncHost = struct {
     machine: *pingo.machine.Machine,
     tools: []SimTool,
@@ -329,8 +331,15 @@ const AsyncHost = struct {
     trace: bool,
     arena: std.mem.Allocator,
     io: std.Io,
+    loop: *xev.Loop,
+    reader: *pingo.reader.Reader,
     start_ns: i96,
     seq_sum: u64 = 0,
+    state: enum { reading, awaiting } = .reading,
+    armed: std.AutoHashMapUnmanaged(*pingo.machine.Pending, void) = .empty,
+    last: pingo.value.Value = .unspecified,
+    failed: bool = false,
+    err: ?pingo.machine.Error = null,
 
     fn elapsedMs(h: *const AsyncHost) u64 {
         const now = std.Io.Clock.now(.awake, h.io).nanoseconds;
@@ -345,23 +354,71 @@ const AsyncHost = struct {
         completion: xev.Completion = undefined,
     };
 
-    fn dispatch(h: *AsyncHost, loop: *xev.Loop, p: *pingo.machine.Pending) !void {
-        const latency = latencyOf(h.tools, &[_]ReplayTool{}, p.capability);
-        h.seq_sum += latency;
-        if (h.trace) {
-            h.out.print("[t={d:>5}ms] dispatch {s}", .{ h.elapsedMs(), p.capability.name }) catch {};
-            writeArgs(h.out, p.args) catch {};
-            h.out.writeByte('\n') catch {};
+    /// Pumps the machine to its next stop, arming timers for every newly
+    /// dispatched call. Runs at startup and after each settle; drives forms
+    /// forward when one completes. On error it records and stops arming, so
+    /// the loop drains and returns.
+    fn advance(h: *AsyncHost) void {
+        while (true) {
+            const outcome = blk: {
+                if (h.state == .awaiting) break :blk h.machine.continueRun();
+                const d = (h.reader.read() catch {
+                    h.failed = true;
+                    h.err = pingo.machine.Error.BadSyntax;
+                    return;
+                }) orelse return; // EOF: last value stands
+                break :blk h.machine.evalToplevel(d);
+            };
+            const oc = outcome catch |e| {
+                h.failed = true;
+                h.err = e;
+                return;
+            };
+            switch (oc) {
+                .blocked => {
+                    h.state = .awaiting;
+                    h.armOutstanding();
+                    return;
+                },
+                .value => |v| {
+                    h.last = v;
+                    h.state = .reading; // advance to the next form
+                },
+            }
         }
-        const call = try h.arena.create(Call);
-        call.* = .{ .host = h, .pending = p, .timer = try xev.Timer.init() };
-        call.timer.run(loop, &call.completion, latency, Call, call, onTimer);
+    }
+
+    fn armOutstanding(h: *AsyncHost) void {
+        for (h.machine.outstanding()) |p| {
+            if (h.armed.contains(p)) continue;
+            h.armed.put(h.arena, p, {}) catch {
+                h.failed = true;
+                return;
+            };
+            const latency = latencyOf(h.tools, &[_]ReplayTool{}, p.capability);
+            h.seq_sum += latency;
+            if (h.trace) {
+                h.out.print("[t={d:>5}ms] dispatch {s}", .{ h.elapsedMs(), p.capability.name }) catch {};
+                writeArgs(h.out, p.args) catch {};
+                h.out.writeByte('\n') catch {};
+            }
+            const call = h.arena.create(Call) catch {
+                h.failed = true;
+                return;
+            };
+            call.* = .{ .host = h, .pending = p, .timer = xev.Timer.init() catch {
+                h.failed = true;
+                return;
+            } };
+            call.timer.run(h.loop, &call.completion, latency, Call, call, onTimer);
+        }
     }
 
     fn onTimer(ud: ?*Call, _: *xev.Loop, _: *xev.Completion, r: xev.Timer.RunError!void) xev.CallbackAction {
         const call = ud.?;
         const h = call.host;
         _ = r catch {};
+        _ = h.armed.remove(call.pending);
         const cap = call.pending.capability;
         if (cap.handler(cap.ctx, h.arena, call.pending.args)) |result| {
             if (h.trace) {
@@ -374,6 +431,9 @@ const AsyncHost = struct {
             if (h.trace) h.out.print("[t={d:>5}ms] settle   {s} -> FAILED\n", .{ h.elapsedMs(), cap.name }) catch {};
             h.machine.resolveFailure(call.pending);
         }
+        // Stream: pump the machine now so this call's dependents dispatch
+        // immediately, instead of waiting for the other in-flight timers.
+        if (!h.failed) h.advance();
         return .disarm;
     }
 };
@@ -401,6 +461,9 @@ fn runFileAsync(init: std.process.Init, out: *std.Io.Writer, path: []const u8, t
     var loop = try xev.Loop.init(.{});
     defer loop.deinit();
 
+    const src = try readWholeFile(init, out, path, session_arena);
+    var reader = pingo.reader.Reader.init(session_arena, src, max_read_depth);
+
     var host = AsyncHost{
         .machine = &machine,
         .tools = tools,
@@ -408,42 +471,21 @@ fn runFileAsync(init: std.process.Init, out: *std.Io.Writer, path: []const u8, t
         .trace = trace,
         .arena = session_arena,
         .io = init.io,
+        .loop = &loop,
+        .reader = &reader,
         .start_ns = std.Io.Clock.now(.awake, init.io).nanoseconds,
     };
 
-    const src = try readWholeFile(init, out, path, session_arena);
-    var reader = pingo.reader.Reader.init(session_arena, src, max_read_depth);
+    // Kick the machine; timer callbacks stream the rest to completion.
+    host.advance();
+    try loop.run(.until_done);
 
-    var last: pingo.value.Value = .unspecified;
-    var failed = false;
-    read_loop: while (true) {
-        const d = reader.read() catch |err| {
-            try out.print("read error: {s}\n", .{@errorName(err)});
-            try out.flush();
-            std.process.exit(1);
-        } orelse break;
-
-        var outcome = machine.evalToplevel(d) catch |err| {
-            try reportError(out, &machine, err);
-            failed = true;
-            break :read_loop;
-        };
-        while (outcome == .blocked) {
-            // Arm a real timer per outstanding call, then let libxev run the
-            // whole batch — the timers overlap in wall-clock time.
-            for (machine.outstanding()) |p| try host.dispatch(&loop, p);
-            try loop.run(.until_done);
-            outcome = machine.continueRun() catch |err| {
-                try reportError(out, &machine, err);
-                failed = true;
-                break :read_loop;
-            };
-        }
-        last = outcome.value;
+    if (host.failed) {
+        try reportError(out, &machine, host.err orelse pingo.machine.Error.HostError);
+        std.process.exit(1);
     }
-
-    if (!failed and last != .unspecified) {
-        try pingo.printer.writeValue(last, out);
+    if (host.last != .unspecified) {
+        try pingo.printer.writeValue(host.last, out);
         try out.writeByte('\n');
     }
     if (host.seq_sum > 0) {
@@ -455,7 +497,6 @@ fn runFileAsync(init: std.process.Init, out: *std.Io.Writer, path: []const u8, t
         try out.print("real time: {d}ms | sequential sum: {d}ms | speedup: {d:.2}x\n", .{ real_ms, host.seq_sum, speedup });
     }
     try out.flush();
-    if (failed) std.process.exit(1);
 }
 
 fn readWholeFile(init: std.process.Init, out: *std.Io.Writer, path: []const u8, arena: std.mem.Allocator) ![]u8 {
