@@ -4,20 +4,20 @@ const std = @import("std");
 
 pub const version = "0.0.0";
 
-pub const lexer = @import("lexer.zig");
-pub const datum = @import("datum.zig");
-pub const reader = @import("reader.zig");
-pub const printer = @import("printer.zig");
-pub const value = @import("value.zig");
-pub const eval = @import("eval.zig");
-pub const env = @import("env.zig");
-pub const primitives = @import("primitives.zig");
-pub const limits = @import("limits.zig");
-pub const capability = @import("capability.zig");
-pub const machine = @import("machine.zig");
-pub const expand = @import("expand.zig");
-pub const trace = @import("trace.zig");
-pub const macro = @import("macro.zig");
+pub const lexer = @import("syntax/lexer.zig");
+pub const datum = @import("syntax/datum.zig");
+pub const reader = @import("syntax/reader.zig");
+pub const printer = @import("syntax/printer.zig");
+pub const value = @import("runtime/value.zig");
+pub const eval = @import("engine/eval.zig");
+pub const env = @import("runtime/env.zig");
+pub const primitives = @import("engine/primitives.zig");
+pub const limits = @import("runtime/limits.zig");
+pub const capability = @import("runtime/capability.zig");
+pub const machine = @import("engine/machine.zig");
+pub const expand = @import("engine/expand.zig");
+pub const trace = @import("host/trace.zig");
+pub const macro = @import("engine/macro.zig");
 
 test {
     std.testing.refAllDecls(@This());

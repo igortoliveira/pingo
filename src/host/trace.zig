@@ -5,9 +5,9 @@
 //! boundary (§4).
 
 const std = @import("std");
-const capability = @import("capability.zig");
-const printer = @import("printer.zig");
-const value_mod = @import("value.zig");
+const capability = @import("../runtime/capability.zig");
+const printer = @import("../syntax/printer.zig");
+const value_mod = @import("../runtime/value.zig");
 
 const Value = value_mod.Value;
 const EffectClass = capability.EffectClass;
@@ -60,8 +60,8 @@ pub fn writeCall(w: *std.Io.Writer, name: []const u8, args: []const Value, resul
 
 // -- replay ----------------------------------------------------------------
 
-const datum_mod = @import("datum.zig");
-const reader_mod = @import("reader.zig");
+const datum_mod = @import("../syntax/datum.zig");
+const reader_mod = @import("../syntax/reader.zig");
 const Datum = datum_mod.Datum;
 
 pub const ToolSpec = struct { name: []const u8, class: EffectClass, latency_ms: u64 };

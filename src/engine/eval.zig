@@ -3,9 +3,9 @@
 //! defines what future schedulers are allowed to produce.
 
 const std = @import("std");
-const datum_mod = @import("datum.zig");
-const value_mod = @import("value.zig");
-const env_mod = @import("env.zig");
+const datum_mod = @import("../syntax/datum.zig");
+const value_mod = @import("../runtime/value.zig");
+const env_mod = @import("../runtime/env.zig");
 const primitives = @import("primitives.zig");
 const expand = @import("expand.zig");
 const macro_mod = @import("macro.zig");
@@ -110,7 +110,7 @@ pub const Evaluator = struct {
         }
         // The host bundles several source files into the environment at init
         // (not a library system — no import/paths/authority; §7).
-        const sources = [_][]const u8{ @embedFile("prelude.scm"), @embedFile("regex.scm") };
+        const sources = [_][]const u8{ @embedFile("../scheme/prelude.scm"), @embedFile("../scheme/regex.scm") };
         for (sources) |src| {
             var r = reader_mod.Reader.init(e.arena, src, 64);
             while (r.read() catch unreachable) |d| {
@@ -433,7 +433,7 @@ const isPureData = value_mod.isPureData;
 
 // -- tests --------------------------------------------------------------
 
-const reader_mod = @import("reader.zig");
+const reader_mod = @import("../syntax/reader.zig");
 
 pub const TestSession = struct {
     arena_state: std.heap.ArenaAllocator,
@@ -735,9 +735,9 @@ test "heap budget stops a heap bomb as limit-exceeded" {
     try std.testing.expectEqualStrings("limit-exceeded", kindOf(error.OutOfMemory));
 }
 
-const limits_mod = @import("limits.zig");
+const limits_mod = @import("../runtime/limits.zig");
 
-const capability_mod = @import("capability.zig");
+const capability_mod = @import("../runtime/capability.zig");
 
 const EchoHost = struct {
     calls: usize = 0,

@@ -3,7 +3,7 @@
 //! semantics cannot drift between them.
 
 const std = @import("std");
-const datum_mod = @import("datum.zig");
+const datum_mod = @import("../syntax/datum.zig");
 
 const Datum = datum_mod.Datum;
 
@@ -552,8 +552,8 @@ fn listFrom(arena: std.mem.Allocator, items: []const Datum) Error!Datum {
 
 // -- tests --------------------------------------------------------------
 
-const reader_mod = @import("reader.zig");
-const printer_mod = @import("printer.zig");
+const reader_mod = @import("../syntax/reader.zig");
+const printer_mod = @import("../syntax/printer.zig");
 
 fn expectExpansionCond(src: []const u8, expected: []const u8) !void {
     const wrap = struct {

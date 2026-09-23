@@ -10,9 +10,9 @@
 //! at use time through `Env.lookup`'s alias fallback.
 
 const std = @import("std");
-const datum_mod = @import("datum.zig");
-const env_mod = @import("env.zig");
-const value_mod = @import("value.zig");
+const datum_mod = @import("../syntax/datum.zig");
+const env_mod = @import("../runtime/env.zig");
+const value_mod = @import("../runtime/value.zig");
 
 const Datum = datum_mod.Datum;
 

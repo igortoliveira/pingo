@@ -105,7 +105,12 @@ Pingo is meant to be embedded. Three ways in:
 ## Repository layout
 
 ```
-src/            Zig: reader, both engines, primitives, prelude.scm, regex.scm, C API
+src/            Zig sources, grouped as one module (`root.zig`, `main.zig` at top):
+  syntax/         lexer, datum, reader, printer
+  runtime/        value, env, capability, limits
+  engine/         eval (oracle), machine, primitives, expand, macro
+  host/           trace (record/replay), capi (C API)
+  scheme/         prelude.scm, regex.scm
 include/        pingo.h — the C API header
 python/         the `pingo` Python package (+ its tests)
 examples/       runnable examples — e.g. examples/code-mode (LLM code-mode over pydantic-ai)

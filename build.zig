@@ -47,9 +47,12 @@ pub fn build(b: *std.Build) void {
 
     // C API: static and shared libpingo over src/capi.zig, plus the header.
     const capi_mod = b.createModule(.{
-        .root_source_file = b.path("src/capi.zig"),
+        .root_source_file = b.path("src/host/capi.zig"),
         .target = target,
         .optimize = optimize,
+        .imports = &.{
+            .{ .name = "pingo", .module = mod },
+        },
     });
     const lib_static = b.addLibrary(.{ .name = "pingo", .linkage = .static, .root_module = capi_mod });
     const lib_shared = b.addLibrary(.{ .name = "pingo", .linkage = .dynamic, .root_module = capi_mod });

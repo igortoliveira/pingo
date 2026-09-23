@@ -5,9 +5,9 @@
 //! evaluator in eval.zig, which remains the reference oracle (§6).
 
 const std = @import("std");
-const datum_mod = @import("datum.zig");
-const value_mod = @import("value.zig");
-const env_mod = @import("env.zig");
+const datum_mod = @import("../syntax/datum.zig");
+const value_mod = @import("../runtime/value.zig");
+const env_mod = @import("../runtime/env.zig");
 const primitives = @import("primitives.zig");
 const eval_mod = @import("eval.zig");
 const expand = @import("expand.zig");
@@ -23,7 +23,7 @@ pub const Diagnostic = eval_mod.Diagnostic;
 
 pub const Pending = Value.Pending;
 
-const prelude_sources = [_][]const u8{ @embedFile("prelude.scm"), @embedFile("regex.scm") };
+const prelude_sources = [_][]const u8{ @embedFile("../scheme/prelude.scm"), @embedFile("../scheme/regex.scm") };
 
 pub const Outcome = union(enum) {
     value: Value,
@@ -1057,7 +1057,7 @@ fn isForm(p: *const Datum.Pair, name: []const u8) bool {
 
 // -- tests --------------------------------------------------------------
 
-const reader_mod = @import("reader.zig");
+const reader_mod = @import("../syntax/reader.zig");
 
 pub const TestMachine = struct {
     arena_state: std.heap.ArenaAllocator,
@@ -1340,7 +1340,7 @@ test "machine: deep non-tail recursion hits the frame limit" {
     try std.testing.expectEqual(@as(i64, 120), (try t.run("(fact 5)")).integer);
 }
 
-const capability_mod = @import("capability.zig");
+const capability_mod = @import("../runtime/capability.zig");
 
 const CountingHost = struct {
     calls: usize = 0,
@@ -2057,7 +2057,7 @@ test "differential: machine and oracle agree on a form corpus" {
     }
 }
 
-const printer_mod = @import("printer.zig");
+const printer_mod = @import("../syntax/printer.zig");
 
 test "machine: syntax errors and fuel" {
     var t = TestMachine.init();

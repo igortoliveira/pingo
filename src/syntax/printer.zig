@@ -43,7 +43,7 @@ pub fn write(d: Datum, w: *std.Io.Writer) std.Io.Writer.Error!void {
     }
 }
 
-const value_mod = @import("value.zig");
+const value_mod = @import("../runtime/value.zig");
 const Value = value_mod.Value;
 
 /// Cycle-safe (§1): the spine is capped and the car side depth-capped; the
@@ -192,7 +192,7 @@ test "writeValue covers runtime-only values" {
     );
 }
 
-const eval_mod = @import("eval.zig");
+const eval_mod = @import("../engine/eval.zig");
 
 test "reals print re-readably" {
     var out = std.Io.Writer.Allocating.init(std.testing.allocator);

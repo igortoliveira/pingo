@@ -10,7 +10,7 @@
 //! one concurrently.
 
 const std = @import("std");
-const pingo = @import("root.zig");
+const pingo = @import("pingo");
 
 const Machine = pingo.machine.Machine;
 const Value = pingo.value.Value;

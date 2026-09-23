@@ -7,10 +7,10 @@
 //! created it). `fromDatum` therefore copies bytes instead of aliasing.
 
 const std = @import("std");
-const datum_mod = @import("datum.zig");
+const datum_mod = @import("../syntax/datum.zig");
 const env_mod = @import("env.zig");
 const capability_mod = @import("capability.zig");
-const expand_mod = @import("expand.zig");
+const expand_mod = @import("../engine/expand.zig");
 
 /// Errors a primitive may raise; a subset of the evaluator's error set
 /// (defined here so value.zig doesn't depend on eval.zig).
@@ -235,7 +235,7 @@ pub fn fromDatum(arena: std.mem.Allocator, d: datum_mod.Datum) std.mem.Allocator
 
 // -- tests --------------------------------------------------------------
 
-const reader_mod = @import("reader.zig");
+const reader_mod = @import("../syntax/reader.zig");
 
 test "fromDatum converts structure and copies bytes" {
     var datum_arena = std.heap.ArenaAllocator.init(std.testing.allocator);

@@ -2,8 +2,8 @@
 //! Anything with authority lives behind host capabilities (Phase 5), never here.
 
 const std = @import("std");
-const value_mod = @import("value.zig");
-const env_mod = @import("env.zig");
+const value_mod = @import("../runtime/value.zig");
+const env_mod = @import("../runtime/env.zig");
 
 const Value = value_mod.Value;
 const PrimitiveError = value_mod.PrimitiveError;
@@ -308,7 +308,7 @@ fn stringToNumber(_: std.mem.Allocator, args: []const Value) PrimitiveError!Valu
     return .{ .boolean = false };
 }
 
-const printer_mod = @import("printer.zig");
+const printer_mod = @import("../syntax/printer.zig");
 
 fn asString(v: Value) PrimitiveError![]u8 {
     return if (v == .string) v.string else error.TypeError;
@@ -1086,6 +1086,6 @@ test "printer truncates cyclic values instead of diverging" {
 
     var out = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer out.deinit();
-    try @import("printer.zig").writeValue(cyc, &out.writer);
+    try @import("../syntax/printer.zig").writeValue(cyc, &out.writer);
     try std.testing.expect(std.mem.endsWith(u8, out.written(), " ...)"));
 }
