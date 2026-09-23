@@ -52,13 +52,22 @@ guest's alist records. The POC adds only the code-mode layer:
 
 ## Run
 
+From the repo root, build the library once (the `pingo` package finds it in
+`zig-out/lib`), then run from this directory:
+
 ```bash
-cd .. && zig build            # produces zig-out/lib/libpingo.dylib
-cd poc
-uv run pytest                 # offline tests, no LLM/network
+# 1. build libpingo (repo root)
+zig build
+
+# 2. this example (examples/code-mode)
+cd examples/code-mode
+uv run pytest                            # offline tests, no LLM/network
 echo 'OPENROUTER_API_KEY=sk-or-...' > .env
-uv run python demo.py         # or: uv run python demo.py "your question"
+uv run python demo.py                    # or: uv run python demo.py "your question"
 ```
+
+`uv` installs the `pingo` package from the repo root (editable path dep) into a
+local `.venv` automatically on first run.
 
 Model defaults to `openrouter:anthropic/claude-opus-5`; override with
 `POC_MODEL` (any pydantic-ai model string).
@@ -77,9 +86,10 @@ with two parallel batches:
 ## Accepted limitations
 
 - No JSON in the guest → structured data is alists `(("k" . v) ...)`.
-- No exceptions in the guest → any error aborts the whole `run_scheme`; the
-  failing tool's Python exception is appended to the error and the agent
-  retries (`ModelRetry`).
+- The guest *can* catch errors with `guard` (a caught tool failure does not
+  abort the program); an **uncaught** error aborts the whole `run_scheme`, and
+  the failing tool's Python exception is appended to the error so the agent can
+  retry (`ModelRetry`).
 - Strings are byte-strings (multi-byte UTF-8 is seen byte-by-byte) — fine for
   passing through, careful with `string-length` on accented text.
 - One fresh session per `run_scheme`; wall-clock timeout is the host's job
