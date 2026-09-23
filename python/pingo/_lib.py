@@ -2,8 +2,9 @@
 
 Loading order for the shared library:
   1. the `PINGO_LIB` environment variable, if set (a full path);
-  2. `zig-out/lib/` in the repository this package lives in;
-  3. the system loader (`ctypes.util.find_library("pingo")`).
+  2. the library bundled inside this package (installed wheels ship it here);
+  3. `zig-out/lib/` in the repository this package lives in (editable installs);
+  4. the system loader (`ctypes.util.find_library("pingo")`).
 """
 
 from __future__ import annotations
@@ -46,8 +47,12 @@ def _candidate_paths() -> list[str]:
     env = os.environ.get("PINGO_LIB")
     if env:
         paths.append(env)
-    # walk up from this file looking for zig-out/lib
     here = Path(__file__).resolve()
+    # the library bundled next to this module (a built/installed wheel)
+    bundled = here.parent / _lib_filename()
+    if bundled.exists():
+        paths.append(str(bundled))
+    # walk up from this file looking for zig-out/lib (editable/dev checkout)
     for parent in here.parents:
         candidate = parent / "zig-out" / "lib" / _lib_filename()
         if candidate.exists():

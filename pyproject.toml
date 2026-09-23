@@ -1,0 +1,45 @@
+[project]
+name = "pingo"
+version = "0.0.0"
+description = "Embeddable sandboxed Scheme with an opportunistic effect model (Python binding over libpingo)"
+readme = "python/README.md"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.optional-dependencies]
+test = ["pytest>=8", "pytest-asyncio>=0.24"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+# The wheel bundles the compiled libpingo (built by hatch_build.py). It maps
+# python/pingo/ -> the importable `pingo` package.
+[tool.hatch.build.targets.wheel]
+packages = ["python/pingo"]
+artifacts = [
+    "python/pingo/libpingo.dylib",
+    "python/pingo/libpingo.so",
+    "python/pingo/pingo.dll",
+]
+
+[tool.hatch.build.targets.wheel.hooks.custom]
+path = "hatch_build.py"
+
+# The sdist carries the Zig sources so the wheel can be rebuilt on install.
+[tool.hatch.build.targets.sdist]
+include = [
+    "src/",
+    "include/",
+    "python/pingo/",
+    "python/README.md",
+    "build.zig",
+    "build.zig.zon",
+    "hatch_build.py",
+    "pyproject.toml",
+    "README.md",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["python/tests"]

@@ -2,3 +2,23 @@
 zig-out/
 zig-pkg/
 .DS_Store
+
+# Python packaging / build artifacts
+dist/
+build/
+.venv/
+*.egg-info/
+__pycache__/
+.pytest_cache/
+# libpingo copied into the package by hatch_build.py at wheel-build time
+python/pingo/libpingo.dylib
+python/pingo/libpingo.so
+python/pingo/pingo.dll
+
+# example apps bring their own virtualenv / lockfile
+examples/*/.venv/
+examples/*/uv.lock
+.env
+
+# lockfiles (this is a library)
+uv.lock

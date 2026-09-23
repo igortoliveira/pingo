@@ -1,0 +1,19 @@
+[project]
+name = "pingo-poc"
+version = "0.1.0"
+description = "POC: pydantic-ai code mode with LLM-written Scheme executed by embedded pingo"
+requires-python = ">=3.11"
+dependencies = [
+    "pydantic-ai-slim[openrouter]>=1.0",
+    "httpx>=0.27",
+    "pingo",
+]
+
+[tool.uv.sources]
+pingo = { path = "../..", editable = true }
+
+[dependency-groups]
+dev = ["pytest>=8", "pytest-asyncio>=0.24"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"

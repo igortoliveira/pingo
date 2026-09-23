@@ -7,16 +7,21 @@ from ordinary Python objects, so you never handle raw s-expression strings.
 
 Not tied to any agent framework: it exposes a `Session` and gets out of the way.
 
-## Requirements
-
-Build the library first, from the repo root:
+## Install
 
 ```sh
-zig build          # produces zig-out/lib/libpingo.{dylib,so}
+pip install pingo          # or: uv add pingo
 ```
 
-The binding finds it automatically (via the repo's `zig-out/lib`), or set
-`PINGO_LIB=/path/to/libpingo.dylib`.
+The wheel bundles a compiled `libpingo` for your platform, so there is nothing
+else to build. Building a wheel from source needs [Zig](https://ziglang.org)
+(0.16+) on `PATH`; the build hook (`hatch_build.py`) runs `zig build` and embeds
+the shared library. Build one yourself from the repo root with `uv build` (or
+`python -m build`).
+
+At runtime the binding locates `libpingo` in this order: `PINGO_LIB` (a full
+path), the copy bundled in the installed package, the repo's `zig-out/lib`
+(editable/dev checkouts), then the system loader.
 
 ## Synchronous
 
@@ -84,6 +89,8 @@ A handler that raises signals a host failure (surfaces to the guest as
 ## Tests
 
 ```sh
-zig build                       # from the repo root, so the lib exists
-cd python && python -m pytest   # the sexpr tests need no library; session tests skip without it
+# from the repo root; builds the lib into the dev env and runs the suite
+uv run --with pytest --with pytest-asyncio --with . pytest python/tests
 ```
+
+The sexpr tests need no library; session tests skip without it.
