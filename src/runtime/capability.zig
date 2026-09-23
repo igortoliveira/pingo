@@ -13,9 +13,19 @@ const Value = value_mod.Value;
 pub const EffectClass = enum {
     pure,
     external_independent,
-    resource_ordered, // resource-key modeling arrives with resource effects
+    resource_ordered, // per-resource ordering via the resource-key projection (§18)
     globally_ordered,
     irreversible,
+};
+
+/// §18 how a `resource_ordered` capability's calls commute on the *same* key.
+/// Anything other than `non_commutative` lets same-capability, same-key calls
+/// overlap (they need not keep dispatch order among themselves).
+pub const Commutativity = enum {
+    non_commutative,
+    read_only,
+    commutative_monoid,
+    idempotent,
 };
 
 /// What a handler may signal. `HostError` surfaces to the guest as the
@@ -49,6 +59,9 @@ pub const Capability = struct {
     /// §18 resource key projection (only consulted for `resource_ordered`).
     /// Null → the class falls back to global ordering (the safe default).
     resource: ?ResourceFn = null,
+    /// §18 commutativity of this capability's calls on the same resource key.
+    /// Default `non_commutative` (same-key calls keep order — the safe default).
+    commutativity: Commutativity = .non_commutative,
 };
 
 /// Makes the capability visible to the guest as a callable value.

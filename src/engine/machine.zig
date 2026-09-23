@@ -12,6 +12,7 @@ const primitives = @import("primitives.zig");
 const eval_mod = @import("eval.zig");
 const expand = @import("expand.zig");
 const macro_mod = @import("macro.zig");
+const capability_mod = @import("../runtime/capability.zig");
 
 const Datum = datum_mod.Datum;
 const Value = value_mod.Value;
@@ -38,9 +39,10 @@ const Control = union(enum) {
     /// Strict wait on one pending call (§4 strictness points).
     awaiting: *Pending,
     /// Drain barrier before an ordered-class dispatch (§4/§18): waits until no
-    /// *conflicting* call is outstanding (same resource key; a null key is
-    /// global and conflicts with all), then re-delivers to the apply frame.
-    barrier: ?[]const u8,
+    /// *conflicting* call is outstanding (same resource key and not a commuting
+    /// same-capability op; a null key is global and conflicts with all), then
+    /// re-delivers to the apply frame.
+    barrier: struct { key: ?[]const u8, cap: *const capability_mod.Capability },
 };
 
 const Expr = struct { d: Datum, env: *Env };
@@ -58,6 +60,15 @@ fn keysConflict(a: ?[]const u8, b: ?[]const u8) bool {
     const ka = a orelse return true;
     const kb = b orelse return true;
     return std.mem.eql(u8, ka, kb);
+}
+
+/// §18 whether an incoming call (capability `c`, key `key`) conflicts with an
+/// outstanding call `p` — i.e. must keep dispatch order behind it. Keys must
+/// conflict; but same-capability calls whose op commutes on the key may overlap.
+fn callsConflict(c: *const capability_mod.Capability, key: ?[]const u8, p: *const Pending) bool {
+    if (!keysConflict(key, p.key)) return false;
+    if (p.capability == c and c.commutativity != .non_commutative) return false;
+    return true;
 }
 
 /// One suspended context; the application frame lands in 6.5.
@@ -383,9 +394,9 @@ pub const Machine = struct {
                     },
                     .outstanding => return .blocked,
                 },
-                .barrier => |key| {
+                .barrier => |b| {
                     for (m.outstanding_calls.items) |p|
-                        if (keysConflict(key, p.key)) return .blocked;
+                        if (callsConflict(b.cap, b.key, p)) return .blocked;
                     // No conflicting call outstanding: re-deliver to the apply
                     // frame, which retries the dispatch (§18 per-key drain).
                     m.control = .{ .value = .unspecified };
@@ -816,9 +827,9 @@ pub const Machine = struct {
                                 m.diagnostic = .{ .context = prior.capability.name };
                                 return Error.HostError;
                             };
-                        for (m.outstanding_calls.items) |p| if (keysConflict(call_key, p.key)) {
+                        for (m.outstanding_calls.items) |p| if (callsConflict(c, call_key, p)) {
                             try m.pushFrame(.{ .apply = .{ .collected = collected } });
-                            return .{ .barrier = call_key };
+                            return .{ .barrier = .{ .key = call_key, .cap = c } };
                         };
                     },
                 }
@@ -1358,8 +1369,6 @@ test "machine: deep non-tail recursion hits the frame limit" {
     try std.testing.expectEqual(@as(i64, 120), (try t.run("(fact 5)")).integer);
 }
 
-const capability_mod = @import("../runtime/capability.zig");
-
 const CountingHost = struct {
     calls: usize = 0,
 
@@ -1571,6 +1580,23 @@ test "machine: resource-ordered — same key serializes (§18)" {
     try std.testing.expect(out2 == .blocked);
     try std.testing.expectEqual(@as(usize, 1), m.outstanding().len);
     try std.testing.expectEqual(@as(i64, 2), m.outstanding()[0].args[1].integer);
+}
+
+test "machine: resource-ordered — commuting op overlaps on the same key (§18)" {
+    var t = TestMachine.init();
+    defer t.deinit();
+    _ = try t.run("1");
+    const arena = t.arena_state.allocator();
+    const m = &t.machine.?;
+
+    var dummy: u8 = 0;
+    // Same key, but the op commutes -> the two calls may overlap.
+    const w = capability_mod.Capability{ .name = "w", .class = .resource_ordered, .ctx = &dummy, .handler = nopHandler, .resource = keyOfFirstArg, .commutativity = .commutative_monoid };
+    try capability_mod.register(m.global, &w);
+
+    const outcome = try m.evalToplevel(try readOne(arena, "(list (w \"a\" 1) (w \"a\" 2))"));
+    try std.testing.expect(outcome == .blocked);
+    try std.testing.expectEqual(@as(usize, 2), m.outstanding().len);
 }
 
 test "machine: parked calls — independent work overlaps a blocked chain" {
