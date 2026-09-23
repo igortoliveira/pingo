@@ -25,6 +25,13 @@ pub const PINGO_RESOURCE: c_int = 2;
 pub const PINGO_ORDERED: c_int = 3;
 pub const PINGO_IRREVERSIBLE: c_int = 4;
 
+/// §18 commutativity of a resource-ordered capability (opt-in). Mirrors
+/// `capability.Commutativity`.
+pub const PINGO_COMM_NONE: c_int = 0;
+pub const PINGO_COMM_READ_ONLY: c_int = 1;
+pub const PINGO_COMM_MONOID: c_int = 2;
+pub const PINGO_COMM_IDEMPOTENT: c_int = 3;
+
 /// Result of `pingo_feed` / `pingo_continue`.
 pub const PINGO_VALUE: c_int = 0; // the program finished; pingo_result() has the value
 pub const PINGO_BLOCKED: c_int = 1; // capability calls are outstanding; resolve and continue
@@ -47,8 +54,35 @@ fn classFromInt(c: c_int) ?pingo.capability.EffectClass {
 /// A capability handler is never invoked under the blocked/resolve protocol —
 /// the machine suspends and the C host resolves — but a valid pointer is
 /// required. Signalling here would be a bug.
+fn commFromInt(c: c_int) ?pingo.capability.Commutativity {
+    return switch (c) {
+        PINGO_COMM_NONE => .non_commutative,
+        PINGO_COMM_READ_ONLY => .read_only,
+        PINGO_COMM_MONOID => .commutative_monoid,
+        PINGO_COMM_IDEMPOTENT => .idempotent,
+        else => null,
+    };
+}
+
 fn stubHandler(_: *anyopaque, _: std.mem.Allocator, _: []const Value) pingo.capability.HostError!Value {
     return error.HostError;
+}
+
+/// Per-capability config for async-registered capabilities (§18 opt-in). Used
+/// as the capability's `ctx`; `stubHandler` ignores it, but the resource
+/// projection reads the configured argument index from it.
+const RegCap = struct { sess: *Session, resource_arg: ?usize };
+
+/// §18 resource projection for C hosts: the key is the printed form of the
+/// argument at the configured index — a best-effort canonical key the host
+/// opts into via `pingo_register_ex`. Null if unconfigured or out of range.
+fn capiResourceByArg(ctx: *anyopaque, arena: std.mem.Allocator, args: []const Value) std.mem.Allocator.Error!?[]const u8 {
+    const rc: *RegCap = @ptrCast(@alignCast(ctx));
+    const idx = rc.resource_arg orelse return null;
+    if (idx >= args.len) return null;
+    var buf = std.Io.Writer.Allocating.init(arena);
+    pingo.printer.writeValue(args[idx], &buf.writer) catch return null;
+    return try arena.dupe(u8, buf.written());
 }
 
 const Session = struct {
@@ -155,15 +189,29 @@ export fn pingo_free(s: ?*Session) void {
 /// Registers a capability the guest can call. `name` is NUL-terminated; `class`
 /// is one of the PINGO_* class constants. Returns 0 on success, -1 on error.
 export fn pingo_register(s: ?*Session, name: [*:0]const u8, class: c_int) c_int {
+    return pingo_register_ex(s, name, class, -1, PINGO_COMM_NONE);
+}
+
+/// Like `pingo_register`, with the §18 opt-in: `resource_arg` is the argument
+/// index whose printed form is this call's resource key (-1 = none → the class
+/// falls back to global ordering), and `commutativity` is a PINGO_COMM_*
+/// constant. Two `PINGO_RESOURCE` calls conflict only when their keys match and
+/// the op is non-commutative. Returns 0 on success, -1 on error.
+export fn pingo_register_ex(s: ?*Session, name: [*:0]const u8, class: c_int, resource_arg: c_int, commutativity: c_int) c_int {
     const sess = s orelse return -1;
     const cls = classFromInt(class) orelse return -1;
+    const comm = commFromInt(commutativity) orelse return -1;
     const a = sess.arena();
+    const rc = a.create(RegCap) catch return -1;
+    rc.* = .{ .sess = sess, .resource_arg = if (resource_arg < 0) null else @intCast(resource_arg) };
     const cap = a.create(Capability) catch return -1;
     cap.* = .{
         .name = a.dupe(u8, std.mem.span(name)) catch return -1,
         .class = cls,
-        .ctx = sess,
+        .ctx = rc,
         .handler = stubHandler,
+        .resource = if (rc.resource_arg != null) capiResourceByArg else null,
+        .commutativity = comm,
     };
     pingo.capability.register(sess.machine.global, cap) catch return -1;
     return 0;
@@ -380,6 +428,37 @@ test "capi: capability round-trip via blocked/resolve" {
     try std.testing.expectEqual(@as(c_int, 0), pingo_resolve(s, tok, "41"));
     try std.testing.expectEqual(PINGO_VALUE, pingo_continue(s));
     try std.testing.expectEqualStrings("42", std.mem.span(pingo_result(s)));
+}
+
+test "capi: resource-ordered via pingo_register_ex (§18)" {
+    // distinct keys overlap
+    {
+        const s = pingo_new(1_000_000, 500, 0).?;
+        defer pingo_free(s);
+        try std.testing.expectEqual(@as(c_int, 0), pingo_register_ex(s, "w", PINGO_RESOURCE, 0, PINGO_COMM_NONE));
+        try std.testing.expectEqual(PINGO_BLOCKED, pingo_feed(s, "(list (w \"a\" 1) (w \"b\" 2))"));
+        try std.testing.expectEqual(@as(usize, 2), pingo_outstanding_count(s));
+    }
+    // same key serializes: only the first is outstanding
+    {
+        const s = pingo_new(1_000_000, 500, 0).?;
+        defer pingo_free(s);
+        try std.testing.expectEqual(@as(c_int, 0), pingo_register_ex(s, "w", PINGO_RESOURCE, 0, PINGO_COMM_NONE));
+        try std.testing.expectEqual(PINGO_BLOCKED, pingo_feed(s, "(list (w \"a\" 1) (w \"a\" 2))"));
+        try std.testing.expectEqual(@as(usize, 1), pingo_outstanding_count(s));
+        // settle the first; the second now dispatches
+        try std.testing.expectEqual(@as(c_int, 0), pingo_resolve(s, pingo_call_token(s, 0), "0"));
+        try std.testing.expectEqual(PINGO_BLOCKED, pingo_continue(s));
+        try std.testing.expectEqual(@as(usize, 1), pingo_outstanding_count(s));
+    }
+    // a commuting op overlaps even on the same key
+    {
+        const s = pingo_new(1_000_000, 500, 0).?;
+        defer pingo_free(s);
+        try std.testing.expectEqual(@as(c_int, 0), pingo_register_ex(s, "w", PINGO_RESOURCE, 0, PINGO_COMM_MONOID));
+        try std.testing.expectEqual(PINGO_BLOCKED, pingo_feed(s, "(list (w \"a\" 1) (w \"a\" 2))"));
+        try std.testing.expectEqual(@as(usize, 2), pingo_outstanding_count(s));
+    }
 }
 
 fn testDouble(_: ?*anyopaque, args: [*:0]const u8) callconv(.c) ?[*:0]const u8 {

@@ -35,6 +35,12 @@ typedef struct pingo_session pingo_session;
 #define PINGO_ORDERED      3
 #define PINGO_IRREVERSIBLE 4
 
+/* Commutativity of a PINGO_RESOURCE capability on the same key (S18, opt-in). */
+#define PINGO_COMM_NONE       0  /* non-commutative: same-key calls keep order  */
+#define PINGO_COMM_READ_ONLY  1
+#define PINGO_COMM_MONOID     2  /* commutative monoid: same-key calls overlap  */
+#define PINGO_COMM_IDEMPOTENT 3
+
 /* Status returned by pingo_feed / pingo_continue. */
 #define PINGO_VALUE   0  /* finished; pingo_result() has the value            */
 #define PINGO_BLOCKED 1  /* capability calls outstanding; resolve and continue */
@@ -46,6 +52,13 @@ void           pingo_free(pingo_session *s);
 
 /* Register a capability the guest can call. Returns 0 on success, -1 on error. */
 int pingo_register(pingo_session *s, const char *name, int effect_class);
+
+/* Like pingo_register, with the S18 opt-in: resource_arg is the argument index
+ * whose printed form is this call's resource key (-1 = none -> global ordering),
+ * and commutativity is a PINGO_COMM_* constant. Two PINGO_RESOURCE calls
+ * conflict only when their keys match and the op is non-commutative. */
+int pingo_register_ex(pingo_session *s, const char *name, int effect_class,
+                      int resource_arg, int commutativity);
 
 /* Feed a program and drive it to the first stop. Returns a PINGO_* status. */
 int pingo_feed(pingo_session *s, const char *src);

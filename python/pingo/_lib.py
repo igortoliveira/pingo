@@ -22,6 +22,12 @@ RESOURCE = 2
 ORDERED = 3
 IRREVERSIBLE = 4
 
+# Commutativity of a RESOURCE capability on the same key (§18, opt-in).
+COMM_NONE = 0
+COMM_READ_ONLY = 1
+COMM_MONOID = 2
+COMM_IDEMPOTENT = 3
+
 # Status codes returned by feed/continue.
 VALUE = 0
 BLOCKED = 1
@@ -101,6 +107,10 @@ def _declare(lib: ctypes.CDLL) -> None:
 
     lib.pingo_register.restype = ctypes.c_int
     lib.pingo_register.argtypes = [P, cstr, ctypes.c_int]
+
+    # §18 opt-in: resource_arg (-1 = none) + commutativity (COMM_*).
+    lib.pingo_register_ex.restype = ctypes.c_int
+    lib.pingo_register_ex.argtypes = [P, cstr, ctypes.c_int, ctypes.c_int, ctypes.c_int]
 
     lib.pingo_feed.restype = ctypes.c_int
     lib.pingo_feed.argtypes = [P, cstr]
