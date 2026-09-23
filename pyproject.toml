@@ -17,11 +17,6 @@ build-backend = "hatchling.build"
 # python/pingo/ -> the importable `pingo` package.
 [tool.hatch.build.targets.wheel]
 packages = ["python/pingo"]
-artifacts = [
-    "python/pingo/libpingo.dylib",
-    "python/pingo/libpingo.so",
-    "python/pingo/pingo.dll",
-]
 
 [tool.hatch.build.targets.wheel.hooks.custom]
 path = "hatch_build.py"

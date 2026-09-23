@@ -10,7 +10,6 @@ compiled artifact.
 
 from __future__ import annotations
 
-import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -45,14 +44,15 @@ class PingoBuildHook(BuildHookInterface):
                 f"expected {src} after `zig build`; is the shared library "
                 "target still installed in build.zig?"
             )
-        dst = root / "python" / "pingo" / libname
-        shutil.copy2(src, dst)
 
         # Ship a platform wheel that carries the compiled library. The binding
         # is ctypes (no C-extension ABI), so it runs on any Python 3.10+ on this
-        # platform: tag it py3-none-<platform>, not cp3xx-cp3xx.
+        # platform: tag it py3-none-<platform>, not cp3xx-cp3xx. The library is
+        # force-included straight from zig-out into the wheel — never copied into
+        # the source tree, so a source checkout can't accumulate a stale copy
+        # that shadows its own fresh build.
         from packaging.tags import platform_tags
 
         build_data["pure_python"] = False
         build_data["tag"] = f"py3-none-{next(iter(platform_tags()))}"
-        build_data["force_include"][str(dst)] = f"pingo/{libname}"
+        build_data["force_include"][str(src)] = f"pingo/{libname}"
