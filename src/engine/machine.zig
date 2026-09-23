@@ -37,9 +37,10 @@ const Control = union(enum) {
     value: Value,
     /// Strict wait on one pending call (§4 strictness points).
     awaiting: *Pending,
-    /// Drain barrier before an ordered-class dispatch (§4): waits until no
-    /// call is outstanding, then re-delivers to the apply frame beneath.
-    barrier,
+    /// Drain barrier before an ordered-class dispatch (§4/§18): waits until no
+    /// *conflicting* call is outstanding (same resource key; a null key is
+    /// global and conflicts with all), then re-delivers to the apply frame.
+    barrier: ?[]const u8,
 };
 
 const Expr = struct { d: Datum, env: *Env };
@@ -50,6 +51,14 @@ const Parked = struct {
     result: *Pending,
     args: []Value,
 };
+
+/// §18 conflict test between two resource keys. A null key is "global": it
+/// conflicts with everything. Two non-null keys conflict iff equal.
+fn keysConflict(a: ?[]const u8, b: ?[]const u8) bool {
+    const ka = a orelse return true;
+    const kb = b orelse return true;
+    return std.mem.eql(u8, ka, kb);
+}
 
 /// One suspended context; the application frame lands in 6.5.
 const Frame = union(enum) {
@@ -374,10 +383,11 @@ pub const Machine = struct {
                     },
                     .outstanding => return .blocked,
                 },
-                .barrier => {
-                    if (m.outstanding_calls.items.len > 0) return .blocked;
-                    // Drained: re-deliver to the apply frame, which retries
-                    // the dispatch (now with a clear boundary).
+                .barrier => |key| {
+                    for (m.outstanding_calls.items) |p|
+                        if (keysConflict(key, p.key)) return .blocked;
+                    // No conflicting call outstanding: re-deliver to the apply
+                    // frame, which retries the dispatch (§18 per-key drain).
                     m.control = .{ .value = .unspecified };
                 },
             }
@@ -787,28 +797,36 @@ pub const Machine = struct {
                         },
                     };
                 }
-                // Ordered classes (§4): drain outstanding calls first, and
-                // never dispatch past an already-failed call — the strongest
-                // clause of §6 (an irreversible call a failing sequential run
-                // would not reach must never be dispatched).
+                // Ordered classes (§4/§18): drain *conflicting* outstanding
+                // calls first, and never dispatch past a conflicting failed
+                // call (§6; strongest for irreversible — a call a failing
+                // sequential run would not reach must never be dispatched). The
+                // conflict key is the resource projection for resource-ordered;
+                // null (conflicts with all) for globally-ordered/irreversible.
+                var call_key: ?[]const u8 = null;
                 switch (c.class) {
                     .pure, .external_independent => {},
                     .resource_ordered, .globally_ordered, .irreversible => {
-                        for (m.feed_calls.items) |prior| if (prior.state == .failed) {
-                            m.diagnostic = .{ .context = prior.capability.name };
-                            return Error.HostError;
-                        };
-                        if (m.outstanding_calls.items.len > 0) {
+                        call_key = if (c.class == .resource_ordered)
+                            (if (c.resource) |rf| try rf(c.ctx, m.arena, args) else null)
+                        else
+                            null;
+                        for (m.feed_calls.items) |prior|
+                            if (prior.state == .failed and keysConflict(call_key, prior.key)) {
+                                m.diagnostic = .{ .context = prior.capability.name };
+                                return Error.HostError;
+                            };
+                        for (m.outstanding_calls.items) |p| if (keysConflict(call_key, p.key)) {
                             try m.pushFrame(.{ .apply = .{ .collected = collected } });
-                            return .barrier;
-                        }
+                            return .{ .barrier = call_key };
+                        };
                     },
                 }
                 // Dispatch: the call becomes a pending settled by the host,
                 // and evaluation continues — blocking only happens at
                 // strictness points and the toplevel sync.
                 const p = try m.arena.create(Pending);
-                p.* = .{ .capability = c, .args = args };
+                p.* = .{ .capability = c, .args = args, .key = call_key };
                 try m.outstanding_calls.append(m.arena, p);
                 try m.feed_calls.append(m.arena, p);
                 return .{ .value = .{ .pending = p } };
@@ -1503,6 +1521,56 @@ test "machine: independent fan-out overlaps — four calls outstanding at once" 
     m.resolve(s, .{ .symbol = "ok" });
     out = try m.continueRun();
     try std.testing.expectEqualStrings("ok", out.value.symbol);
+}
+
+/// §18 resource projection for tests: the first string argument is the key.
+fn keyOfFirstArg(_: *anyopaque, arena: std.mem.Allocator, args: []const Value) std.mem.Allocator.Error!?[]const u8 {
+    if (args.len == 0 or args[0] != .string) return null;
+    return try arena.dupe(u8, args[0].string);
+}
+
+test "machine: resource-ordered — distinct keys overlap (§18)" {
+    var t = TestMachine.init();
+    defer t.deinit();
+    _ = try t.run("1");
+    const arena = t.arena_state.allocator();
+    const m = &t.machine.?;
+
+    var dummy: u8 = 0;
+    const w = capability_mod.Capability{ .name = "w", .class = .resource_ordered, .ctx = &dummy, .handler = nopHandler, .resource = keyOfFirstArg };
+    try capability_mod.register(m.global, &w);
+
+    // Same capability, different resources -> no conflict -> both dispatch.
+    const outcome = try m.evalToplevel(try readOne(arena, "(list (w \"a\" 1) (w \"b\" 2))"));
+    try std.testing.expect(outcome == .blocked);
+    try std.testing.expectEqual(@as(usize, 2), m.outstanding().len);
+    try std.testing.expectEqualStrings("a", m.outstanding()[0].args[0].string);
+    try std.testing.expectEqualStrings("b", m.outstanding()[1].args[0].string);
+}
+
+test "machine: resource-ordered — same key serializes (§18)" {
+    var t = TestMachine.init();
+    defer t.deinit();
+    _ = try t.run("1");
+    const arena = t.arena_state.allocator();
+    const m = &t.machine.?;
+
+    var dummy: u8 = 0;
+    const w = capability_mod.Capability{ .name = "w", .class = .resource_ordered, .ctx = &dummy, .handler = nopHandler, .resource = keyOfFirstArg };
+    try capability_mod.register(m.global, &w);
+
+    // Same resource -> the second call drains behind the first (barrier).
+    const outcome = try m.evalToplevel(try readOne(arena, "(list (w \"a\" 1) (w \"a\" 2))"));
+    try std.testing.expect(outcome == .blocked);
+    try std.testing.expectEqual(@as(usize, 1), m.outstanding().len);
+    try std.testing.expectEqual(@as(i64, 1), m.outstanding()[0].args[1].integer);
+
+    // Settle the first: the second now dispatches.
+    m.resolve(m.outstanding()[0], .{ .symbol = "ok" });
+    const out2 = try m.continueRun();
+    try std.testing.expect(out2 == .blocked);
+    try std.testing.expectEqual(@as(usize, 1), m.outstanding().len);
+    try std.testing.expectEqual(@as(i64, 2), m.outstanding()[0].args[1].integer);
 }
 
 test "machine: parked calls — independent work overlaps a blocked chain" {

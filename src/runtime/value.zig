@@ -75,6 +75,10 @@ pub const Value = union(enum) {
         /// A failure routed to an exception handler (tier 15D): it was caught,
         /// so it must not also fail the feed at the toplevel sync (§6 revision).
         handled: bool = false,
+        /// §18 resource key for ordering: two calls with conflicting keys
+        /// (equal, or either null = global) keep dispatch order; distinct keys
+        /// are independent. Null for pure/independent and global/irreversible.
+        key: ?[]const u8 = null,
 
         pub const State = union(enum) {
             outstanding,

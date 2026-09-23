@@ -28,12 +28,27 @@ pub const Handler = *const fn (
     args: []const Value,
 ) HostError!Value;
 
+/// §18 resource projection: maps a `resource_ordered` call's arguments to a
+/// canonical resource key. Two such calls conflict (keep dispatch order) iff
+/// their keys are equal; distinct keys are independent and may overlap.
+/// Returning null means "no specific resource → treat as global" (the safe,
+/// conservative default). Must be pure/idempotent: a drain barrier may call it
+/// more than once for the same call while it retries.
+pub const ResourceFn = *const fn (
+    ctx: *anyopaque,
+    arena: std.mem.Allocator,
+    args: []const Value,
+) std.mem.Allocator.Error!?[]const u8;
+
 /// Host-owned; must outlive the session it is registered into.
 pub const Capability = struct {
     name: []const u8,
     class: EffectClass,
     ctx: *anyopaque,
     handler: Handler,
+    /// §18 resource key projection (only consulted for `resource_ordered`).
+    /// Null → the class falls back to global ordering (the safe default).
+    resource: ?ResourceFn = null,
 };
 
 /// Makes the capability visible to the guest as a callable value.
