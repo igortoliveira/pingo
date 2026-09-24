@@ -9,6 +9,19 @@ const Datum = datum_mod.Datum;
 
 pub const Error = error{ BadSyntax, OutOfMemory };
 
+/// A human hint for the most recent `BadSyntax`, surfaced next to the
+/// "bad-syntax" kind so callers (and LLMs writing code) can self-correct.
+/// Module-global; the engines reset it per toplevel form (in `evalToplevel`)
+/// and copy it into their diagnostic when surfacing the error.
+pub var syntax_hint: ?[]const u8 = null;
+
+/// Record `hint` and return `BadSyntax`. Use at syntax-error sites whose cause
+/// is worth telling the caller (malformed bindings, parameter lists, …).
+pub fn badSyntax(hint: []const u8) Error {
+    syntax_hint = hint;
+    return error.BadSyntax;
+}
+
 /// `(let ((n e) ...) body ...)` → `((lambda (n ...) body ...) e ...)`.
 /// `(let name ((n e) ...) body ...)` →
 /// `(letrec ((name (lambda (n ...) body ...))) (name e ...))`.
@@ -25,13 +38,14 @@ pub fn expandLet(arena: std.mem.Allocator, form: Datum) Error!Datum {
     var b = form.pair.car;
     while (b == .pair) : (b = b.pair.cdr) {
         const binding = b.pair.car;
-        if (binding != .pair or binding.pair.car != .symbol) return error.BadSyntax;
+        if (binding != .pair or binding.pair.car != .symbol)
+            return badSyntax("each let binding must be (name value) — a variable name then one init, e.g. (let ((x 1) (y 2)) ...)");
         if (binding.pair.cdr != .pair or binding.pair.cdr.pair.cdr != .empty_list)
-            return error.BadSyntax;
+            return badSyntax("each let binding must be (name value) with exactly one value");
         try names.append(arena, binding.pair.car);
         try exprs.append(arena, binding.pair.cdr.pair.car);
     }
-    if (b != .empty_list) return error.BadSyntax;
+    if (b != .empty_list) return badSyntax("let bindings must be a proper list ((name value) ...)");
 
     const lambda_form = try datum_mod.cons(
         arena,
@@ -71,7 +85,7 @@ pub fn expandLetStar(arena: std.mem.Allocator, form: Datum) Error!Datum {
     const bindings = form.pair.car;
     if (bindings == .empty_list)
         return try datum_mod.cons(arena, try datum_mod.symbol(arena, "let"), form);
-    if (bindings != .pair) return error.BadSyntax;
+    if (bindings != .pair) return badSyntax("let* bindings must be a list ((name value) ...)");
     const first = try listOf(arena, &.{bindings.pair.car});
     const inner = try datum_mod.cons(
         arena,
@@ -512,16 +526,17 @@ pub fn parseBindings(arena: std.mem.Allocator, bindings: Datum) Error!Bindings {
     var b = bindings;
     while (b == .pair) : (b = b.pair.cdr) {
         const binding = b.pair.car;
-        if (binding != .pair or binding.pair.car != .symbol) return error.BadSyntax;
+        if (binding != .pair or binding.pair.car != .symbol)
+            return badSyntax("each binding must be (name value) — a variable name then one init expression, e.g. (let* ((x 1) (y 2)) ...)");
         if (binding.pair.cdr != .pair or binding.pair.cdr.pair.cdr != .empty_list)
-            return error.BadSyntax;
+            return badSyntax("each binding must be (name value) with exactly one value");
         const name = binding.pair.car.symbol;
         for (names.items) |seen|
-            if (std.mem.eql(u8, seen, name)) return error.BadSyntax;
+            if (std.mem.eql(u8, seen, name)) return badSyntax("duplicate variable in bindings");
         try names.append(arena, name);
         try inits.append(arena, binding.pair.cdr.pair.car);
     }
-    if (b != .empty_list) return error.BadSyntax;
+    if (b != .empty_list) return badSyntax("bindings must be a proper list ((name value) ...)");
     return .{
         .names = try arena.dupe([]const u8, names.items),
         .inits = try arena.dupe(Datum, inits.items),

@@ -247,10 +247,14 @@ export fn pingo_result(s: ?*Session) [*:0]const u8 {
 export fn pingo_error(s: ?*Session) [*:0]const u8 {
     const sess = s orelse return "";
     if (sess.status != PINGO_ERROR) return "";
-    if (sess.machine.diagnostic) |d| {
+    // Prefer the engine's diagnostic; fall back to the expander's syntax hint
+    // (set at malformed-binding/parameter sites) so a bad-syntax error tells the
+    // caller what to fix.
+    const context: ?[]const u8 = if (sess.machine.diagnostic) |d| d.context else pingo.expand.syntax_hint;
+    if (context) |ctx| {
         var buf = std.Io.Writer.Allocating.init(sess.arena());
         defer buf.deinit();
-        buf.writer.print("{s} ({s})", .{ sess.err_kind, d.context }) catch return sess.cstr(sess.err_kind);
+        buf.writer.print("{s} ({s})", .{ sess.err_kind, ctx }) catch return sess.cstr(sess.err_kind);
         return sess.cstr(buf.written());
     }
     return sess.cstr(sess.err_kind);

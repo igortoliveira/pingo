@@ -234,6 +234,7 @@ pub const Machine = struct {
         m.handlers.clearRetainingCapacity();
         m.raised = null;
         m.diagnostic = null;
+        expand.syntax_hint = null;
         if (d == .pair and isForm(d.pair, "define-syntax")) {
             try macro_mod.defineSyntax(m.arena, d.pair.cdr, m.global);
             return .{ .value = .unspecified };

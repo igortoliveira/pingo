@@ -133,6 +133,7 @@ pub const Evaluator = struct {
     /// Entry point for programs/REPL lines: only here `define` is legal (§2).
     pub fn evalToplevel(e: *Evaluator, d: Datum) Error!Value {
         e.diagnostic = null;
+        expand.syntax_hint = null;
         if (d == .pair and isForm(d.pair, "define-syntax")) {
             try macro_mod.defineSyntax(e.arena, d.pair.cdr, e.global);
             return .unspecified;

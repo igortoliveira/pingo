@@ -154,10 +154,11 @@ pub fn makeClosure(
         rest_name = rest.symbol; // (lambda args body ...): everything as a list
     } else {
         while (rest == .pair) : (rest = rest.pair.cdr) {
-            if (rest.pair.car != .symbol) return error.BadSyntax;
+            if (rest.pair.car != .symbol)
+                return expand_mod.badSyntax("lambda parameters must be symbols: (lambda (a b ...) body ...)");
             const name = rest.pair.car.symbol;
             for (params.items) |seen|
-                if (std.mem.eql(u8, seen, name)) return error.BadSyntax;
+                if (std.mem.eql(u8, seen, name)) return expand_mod.badSyntax("duplicate lambda parameter");
             try params.append(arena, name);
         }
         switch (rest) {
