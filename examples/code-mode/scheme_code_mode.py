@@ -65,6 +65,11 @@ Language rules (deviations from full Scheme — follow strictly):
   `string-set!`, `vector-set!`, `string-fill!`, `vector-fill!` do NOT exist.
   Build new values (cons/list/append/string-append) and recurse or fold; never
   mutate. Data (pairs, strings, vectors) is immutable.
+- To loop or accumulate WITHOUT `set!`, use the standard (R5RS/R7RS) pure
+  idioms — a named `let`, `do`, `map`/`for-each`, or recursion. An accumulator
+  is a loop parameter, not a mutated variable, e.g.
+  `(let loop ((i 0) (acc 0)) (if (< i n) (loop (+ i 1) (+ acc i)) acc))`.
+  Never reach for a mutable variable; there isn't one.
 - Available forms: quote if define lambda begin let let* letrec (named let) do
   case cond and or when unless delay quasiquote define-syntax/syntax-rules
   let-values let*-values case-lambda define-record-type guard.
@@ -73,8 +78,9 @@ Language rules (deviations from full Scheme — follow strictly):
   cons car cdr list append length reverse list-ref member assoc map for-each
   string-append substring string-length string->number number->string
   string=? string<? symbol->string vector-ref vector->list apply call/cc
-  values ...). Plus list HOFs: filter remove partition find fold-left
-  fold-right for-all exists.
+  values ...). `map`/`for-each`/`do`/named `let` are standard (R5RS/R7RS).
+  Plus list HOFs (R6RS/SRFI-1 extensions, also available): filter remove
+  partition find fold-left fold-right for-all exists.
 - Exceptions: raise, raise-continuable, with-exception-handler, and
   `(error "msg" irritant ...)`; catch with `guard`, e.g.
   `(guard (e (#t (list 'failed (error-object-message e)))) BODY)`. A caught
