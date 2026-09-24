@@ -60,6 +60,23 @@ argument is itself a pending tool result is parked and dispatched automatically
 when the argument settles — plain nested composition already expresses a
 pipeline. Prefer `(map (lambda (x) ...) items)` fan-out over sequential lets.
 
+Scheme in brief (an S-expression language: prefix notation, everything in
+parentheses):
+- Application: `(proc arg ...)` calls `proc`. Numbers, strings, `#t`/`#f` are
+  literals; `'x` / `(quote x)` is literal data.
+- Core forms: `(define name expr)`; `(lambda (param ...) body ...)`;
+  `(let ((name val) ...) body ...)` and `(let* ((name val) ...) body ...)` bind
+  locals — each binding is a `(name value)` pair; `(if test then else)`;
+  `(cond (test expr ...) ... (else expr ...))`; `(and ...)` / `(or ...)`;
+  `(begin expr ...)`.
+- Lists and pairs: `(list a b c)`, `(cons x rest)`, the empty list `'()`. Take
+  them apart with `car` (first element), `cdr` (the rest), and `cadr`/`caddr`
+  (second/third). An association list maps keys to values; `(assoc key alist)`
+  returns the matching `(key . value)` pair.
+- No loops and no mutation: express iteration with recursion, `map`/`for-each`,
+  `fold-left`, or a named let `(let loop ((acc 0) (rest xs)) ...)` that calls
+  itself in tail position.
+
 Language rules (deviations from full Scheme — follow strictly):
 - pingo is PURE: there is no mutation. `set!`, `set-car!`, `set-cdr!`,
   `string-set!`, `vector-set!`, `string-fill!`, `vector-fill!` do NOT exist.
