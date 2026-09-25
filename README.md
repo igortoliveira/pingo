@@ -27,7 +27,7 @@ deterministic and replayable.
   outstanding result is *parked* and fires automatically when that result
   settles — so ordinary nested composition already expresses a dataflow
   pipeline. Concurrency is a property of the data dependencies, not something
-  the program author arranges. (Model: PopPy / λᴼ; see `docs/references.md`.)
+  the program author arranges. (Model: PopPy / λᴼ.)
 
 - **An explicit effect model.** Every capability is tagged with an effect
   class — `pure | independent | resource | ordered | irreversible` — that
@@ -38,8 +38,7 @@ deterministic and replayable.
 - **Pure by default, no opt-out.** There is no mutation: no `set!`,
   `set-car!`, `vector-set!`, string/vector fills — pairs, strings and vectors
   are immutable. Only pure data crosses the host boundary. This is what makes
-  runs deterministic and lets a recorded trace replay exactly
-  (`docs/purity.md`).
+  runs deterministic and lets a recorded trace replay exactly.
 
 - **An honest reference.** Two engines evaluate every program: a recursive
   **oracle** (the readable spec) and an explicit-stack **machine** (which adds
@@ -57,7 +56,7 @@ pure:
   (`guard` / `raise` / `with-exception-handler` / `error`),
 - list HOFs (`filter` `fold-left` `fold-right` `find` `partition` …),
 - **regex** as SRFI-115 SREs — patterns are s-expressions, matched by a
-  fuel-bounded matcher written in Scheme (`docs/regex.md`),
+  fuel-bounded matcher written in Scheme,
 - sugar: `when` `unless` `let-values` `let*-values` `case-lambda`.
 
 Conformance is tracked against vendored Chibi suites: R5RS runs strict (0
@@ -83,7 +82,7 @@ latency is virtual — nothing actually sleeps.
 
 - `--record run.trace` saves every settled call (op, args, result);
   `--replay run.trace` re-runs without `--tool` flags, serving the recorded
-  results (`docs/host.md`).
+  results.
 - `--async` runs on the native **libxev** event loop instead of the virtual
   clock: each call arms a real timer, so an independent batch overlaps in
   wall-clock time (kqueue/io_uring), and the report shows real elapsed vs the
@@ -93,8 +92,8 @@ latency is virtual — nothing actually sleeps.
 
 Pingo is meant to be embedded. Three ways in:
 
-- **C API** — `libpingo` over a small header (`include/pingo.h`,
-  `docs/c-api.md`). Pure data crosses as s-expression text; the host services
+- **C API** — `libpingo` over a small header (`include/pingo.h`).
+  Pure data crosses as s-expression text; the host services
   capabilities through a blocked/resolve protocol, sync or async.
 - **Python** — the `pingo` package wraps the C API via `ctypes` and marshals
   values to/from ordinary Python objects. `pip install pingo` ships a
@@ -114,18 +113,8 @@ src/            Zig sources, grouped as one module (`root.zig`, `main.zig` at to
 include/        pingo.h — the C API header
 python/         the `pingo` Python package (+ its tests)
 examples/       runnable examples — e.g. examples/code-mode (LLM code-mode over pydantic-ai)
-docs/           semantics and design notes (see below)
 tests/          Zig tests, conformance suites, example programs
 pyproject.toml  builds the self-contained Python wheel (hatch_build.py runs `zig build`)
 ```
-
-## Reading further
-
-- Motivation and architecture: `deep-research-report.md`
-- Normative semantics: `docs/semantics.md`
-- Purity, exceptions, call/cc, regex, syntax-rules, host, C API, I/O:
-  the corresponding files under `docs/`
-- Source systems and papers (Thorin, Monty, PopPy/λᴼ, …): `docs/references.md`
-- Execution plan (small commits): `PLAN.md`
 
 Zig: **0.16.0**

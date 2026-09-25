@@ -1,9 +1,9 @@
 # pingo (Python binding)
 
 A generic Python binding for [Pingo](../README.md) — an embeddable, sandboxed
-Scheme with an opportunistic effect model. It wraps `libpingo` (the C API,
-[`docs/c-api.md`](../docs/c-api.md)) via `ctypes` and marshals values to and
-from ordinary Python objects, so you never handle raw s-expression strings.
+Scheme with an opportunistic effect model. It wraps `libpingo` (the C API in
+`include/pingo.h`) via `ctypes` and marshals values to and from ordinary Python
+objects, so you never handle raw s-expression strings.
 
 Not tied to any agent framework: it exposes a `Session` and gets out of the way.
 
