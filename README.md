@@ -1,120 +1,105 @@
 # Pingo
 
-**Pingo is a sandboxed Scheme with an opportunistic effect model** — a small,
-pure interpreter whose programs call *out* to host-provided tools, and whose
-runtime runs those calls concurrently on its own, without the program asking.
-Written in Zig.
+**A sandboxed language for AI agents whose tool calls run in parallel — automatically.**
 
-It is built for the case where an untrusted program (say, one an LLM wrote)
-needs to orchestrate side-effecting tools: fetch things, call APIs, query a
-database. The program is plain Scheme; the host decides which capabilities
-exist and what each one is allowed to do. Independent calls overlap for free,
-the language itself has no way to touch the outside world, and every run is
-deterministic and replayable.
+Give an agent a single `run` tool and it writes a small program instead of one
+tool call per turn ("code mode"). Pingo executes that program: a tiny, pure
+Scheme that starts with **zero** access to the world and reaches out only through
+the tools you grant it. The part nobody else does — Pingo figures out which of
+those tool calls are **independent and runs them together**, without the model
+ever writing `async` or `gather`. It runs in-process: no container, no
+subprocess, no server. Written in Zig.
 
 ```scheme
-; the three fetches are independent, so Pingo dispatches them together
-; and they run concurrently — the program never mentions parallelism
-(map (lambda (city) (get-weather city))
-     (list "Paris" "Tokyo" "Lima"))
+;; The model wrote this to answer "which of these cities is hottest?".
+;; It reads like straight-line code — Pingo runs it in two parallel waves.
+(define cities (list "Paris" "Tokyo" "Lima"))
+(define coords (map geocode cities))    ; 3 geocode calls — dispatched together
+(define temps  (map forecast coords))   ; each forecast waits only on its own
+(apply max temps)                       ; coord, so all 3 fire together too
 ```
 
-## The idea
+No promises, no annotations, no `gather`. Two calls run at the same time whenever
+their inputs don't depend on each other — that falls out of the **data flow**,
+not out of the prompt.
 
-- **Opportunistic execution.** A tool call whose arguments are ready is
-  dispatched immediately; several ready calls are dispatched *as a batch* and
-  serviced concurrently by the host. A call whose argument is still an
-  outstanding result is *parked* and fires automatically when that result
-  settles — so ordinary nested composition already expresses a dataflow
-  pipeline. Concurrency is a property of the data dependencies, not something
-  the program author arranges. (Model: PopPy / λᴼ.)
+## Why Pingo
 
-- **An explicit effect model.** Every capability is tagged with an effect
-  class — `pure | independent | resource | ordered | irreversible` — that
-  declares its ordering contract. `independent` calls may overlap and complete
-  in any order; `ordered`/`irreversible` calls are constrained. The scheduler
-  uses these to decide what may run together (semantics §4/§6).
+- **Parallelism for free.** Independent tool calls go out as a batch and are
+  serviced concurrently; a call waiting on another's result *parks* and fires
+  itself the moment that result lands. Plain `(map f xs)` fans out. The agent
+  never asks for concurrency — the runtime reads it from the program.
+- **Effects the runtime understands.** Each tool declares an effect class —
+  `pure`, `independent`, `resource`, `ordered`, `irreversible` — so Pingo knows
+  what may overlap, what may be retried, and what must never run early. An
+  irreversible call (charge a card, send an email) is never dispatched
+  speculatively.
+- **Deterministic and replayable.** The language has *no mutation* — everything
+  is immutable — so a run depends only on its inputs and its tool results.
+  Record every settled call and replay the whole program later, exactly, offline.
+- **Sandboxed by construction.** No filesystem, no environment, no network, no
+  ambient authority anywhere. Pure data goes in, pure data comes out; the tools
+  are the only door.
 
-- **Pure by default, no opt-out.** There is no mutation: no `set!`,
-  `set-car!`, `vector-set!`, string/vector fills — pairs, strings and vectors
-  are immutable. Only pure data crosses the host boundary. This is what makes
-  runs deterministic and lets a recorded trace replay exactly.
+## Try it
 
-- **An honest reference.** Two engines evaluate every program: a recursive
-  **oracle** (the readable spec) and an explicit-stack **machine** (which adds
-  `call/cc`, `dynamic-wind`, and exceptions). They are differentially tested
-  against each other, so the spec and the fast path can't silently drift apart.
-
-## The language
-
-An R7RS-small subset, minus mutation, plus a few R6RS/SRFI extensions — all
-pure:
-
-- core R5RS forms and numeric/list/string/char/vector/symbol procedures;
-- `syntax-rules` hygienic macros, `call/cc`, `dynamic-wind`, `values`;
-- **records** (`define-record-type`), **exceptions**
-  (`guard` / `raise` / `with-exception-handler` / `error`),
-- list HOFs (`filter` `fold-left` `fold-right` `find` `partition` …),
-- **regex** as SRFI-115 SREs — patterns are s-expressions, matched by a
-  fuel-bounded matcher written in Scheme,
-- sugar: `when` `unless` `let-values` `let*-values` `case-lambda`.
-
-Conformance is tracked against vendored Chibi suites: R5RS runs strict (0
-failures — we match R5RS-minus-mutation), R7RS is a forward coverage oracle
-whose pass count climbs as features land. `zig build conformance`.
-
-## Trying it
-
+```sh
+zig build                        # builds ./zig-out/bin/pingo   (Zig 0.16)
+./zig-out/bin/pingo              # a REPL
+./zig-out/bin/pingo prog.scm     # run a file
 ```
-zig build
-./zig-out/bin/pingo                      # REPL
-./zig-out/bin/pingo program.scm          # run a file (print is granted)
 
-# opportunistic execution from pure Scheme: declare simulated tools
+Watch the parallelism, with simulated tools on a virtual clock:
+
+```sh
 ./zig-out/bin/pingo tests/examples/p1-fanout.scm \
     --tool summarize:independent:100 --tool synthesize:independent:50 --trace
-# [t=0ms] dispatch summarize("doc-1") ... x4 at t=0 — overlap, visibly
+# ... 4 summarize calls dispatched together at t=0 ...
 # virtual time: 150ms | sequential sum: 450ms | speedup: 3.00x
 ```
 
-Tool classes are `pure | independent | resource | ordered | irreversible`;
-latency is virtual — nothing actually sleeps.
+`--record run.trace` / `--replay run.trace` capture and re-run a session;
+`--async` swaps the virtual clock for a real libxev event loop (kqueue/io_uring)
+so an independent batch overlaps in wall-clock time.
 
-- `--record run.trace` saves every settled call (op, args, result);
-  `--replay run.trace` re-runs without `--tool` flags, serving the recorded
-  results.
-- `--async` runs on the native **libxev** event loop instead of the virtual
-  clock: each call arms a real timer, so an independent batch overlaps in
-  wall-clock time (kqueue/io_uring), and the report shows real elapsed vs the
-  sequential sum.
+## Embed it
 
-## Embedding
+Pingo is a library first. The Python binding wraps it via `ctypes` and marshals
+values to and from ordinary Python objects:
 
-Pingo is meant to be embedded. Three ways in:
+```python
+import asyncio
+from pingo import Session, INDEPENDENT
 
-- **C API** — `libpingo` over a small header (`include/pingo.h`).
-  Pure data crosses as s-expression text; the host services
-  capabilities through a blocked/resolve protocol, sync or async.
-- **Python** — the `pingo` package wraps the C API via `ctypes` and marshals
-  values to/from ordinary Python objects. `pip install pingo` ships a
-  self-contained wheel (the compiled library is bundled). See `python/README.md`.
-- **CLI** — the `pingo` binary above (REPL, file runner, record/replay,
-  libxev host).
+async def geocode(city): ...                  # your real async tool
 
-## Repository layout
+async def main():
+    async with Session() as s:
+        s.define_async("geocode", geocode, cls=INDEPENDENT)
+        # both calls are independent -> dispatched together -> run concurrently
+        return await s.run('(map geocode (list "Paris" "Tokyo"))')
 
-```
-src/            Zig sources, grouped as one module (`root.zig`, `main.zig` at top):
-  syntax/         lexer, datum, reader, printer
-  runtime/        value, env, capability, limits
-  engine/         eval (oracle), machine, primitives, expand, macro
-  host/           trace (record/replay), capi (C API)
-  scheme/         prelude.scm, regex.scm
-include/        pingo.h — the C API header
-python/         the `pingo` Python package (+ its tests)
-examples/       runnable examples — e.g. examples/code-mode (LLM code-mode over pydantic-ai)
-tests/          Zig tests, conformance suites, example programs
-pyproject.toml  builds the self-contained Python wheel (hatch_build.py runs `zig build`)
+asyncio.run(main())
 ```
 
-Zig: **0.16.0**
+The binding, the CLI, and `examples/code-mode` (an LLM writing Pingo through
+pydantic-ai) are all thin layers over one C library — `libpingo`, a small header
+(`include/pingo.h`): feed a program, service the outstanding calls, resume. Build
+a self-contained Python wheel with `uv build` (the compiled library is bundled);
+see `python/README.md`.
+
+## The language
+
+A pure subset of R7RS-small plus a few R6RS/SRFI extensions: `syntax-rules`
+hygienic macros, `call/cc`, `dynamic-wind`, records (`define-record-type`),
+exceptions (`guard`/`raise`), list HOFs (`map`/`fold-left`/`filter`/…), and
+SRFI-115 regex whose patterns are s-expressions. No mutation, by design — loops
+and accumulation are recursion, `do`, `map`, and `fold`. Two engines evaluate
+every program — a readable reference and a fast explicit-stack machine —
+differentially tested against each other so they can't drift.
+
+The execution model is opportunistic evaluation (PopPy / λᴼ); the capability
+boundary follows Monty's "no ambient authority" stance. `zig build test` runs the
+suite; `zig build conformance` runs the vendored R5RS/R7RS oracles.
+
+Zig **0.16**
