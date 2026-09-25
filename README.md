@@ -98,8 +98,31 @@ and accumulation are recursion, `do`, `map`, and `fold`. Two engines evaluate
 every program — a readable reference and a fast explicit-stack machine —
 differentially tested against each other so they can't drift.
 
-The execution model is opportunistic evaluation (PopPy / λᴼ); the capability
-boundary follows Monty's "no ambient authority" stance. `zig build test` runs the
-suite; `zig build conformance` runs the vendored R5RS/R7RS oracles.
+The capability boundary follows Monty's "no ambient authority" stance.
+`zig build test` runs the suite; `zig build conformance` runs the vendored
+R5RS/R7RS oracles.
+
+## The opportunistic model (λᴼ)
+
+Pingo's evaluation follows the **Opportunistically Parallel Lambda Calculus
+(λᴼ)** — a core calculus where a program *reads* sequentially but the runtime
+dispatches independent external calls in parallel, and is **confluent**: the
+order in which those calls complete never changes the result, so the parallel run
+is observably identical to running the program top to bottom. λᴼ, and the systems
+paper PopPy, target exactly this compound-AI / tool-calling setting, where LLM
+programs are "essentially pure" and most tool calls commute.
+
+Pingo takes that model **natively** — pending values as placeholders for
+in-flight calls, dataflow dispatch, sequential-semantics preservation — instead
+of compiling to an intermediate calculus. It then goes further where λᴼ stops:
+λᴼ *assumes* effects commute and leaves genuinely non-commutative effects out of
+scope, whereas Pingo makes them explicit with **effect classes**
+(`resource`/`ordered`/`irreversible`) — a stateful or irreversible tool is
+ordered or held back, not reordered. And because the language forbids mutation,
+every run is not just confluent but fully **deterministic and replayable**.
+
+- λᴼ — *Opportunistically Parallel Lambda Calculus* — arXiv:2405.11361
+- PopPy — *Opportunistically Exploiting Parallelism in Python Compound AI
+  Applications* — arXiv:2605.18697
 
 Zig **0.16**
